@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 20.0.0
+          Version: 20.0.1
           Architecture: iphoneos-arm64
           Description: True Hook Interceptor Virtual Camera
           Maintainer: yourname
@@ -49,7 +49,6 @@ jobs:
           }
           EOF
 
-          # === 核心引擎：绝对格式对齐 + 时间戳重写 ===
           cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -72,7 +71,6 @@ jobs:
               AVAssetReaderTrackOutput *_readerOutput;
               NSURL *_videoURL;
               CIContext *_ciContext;
-              CVPixelBufferPoolRef _pool;
           }
           @end
 
@@ -105,7 +103,6 @@ jobs:
               _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
               AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
               if (track) {
-                  // 按照资料建议，不强行 BGRA，先用默认解码，后续在渲染层对齐
                   _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
                       (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
                   }];
@@ -119,7 +116,6 @@ jobs:
               if (!self.isEnabled || !_videoURL) return NULL;
               if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
               
-              // 1. 取出假帧
               CMSampleBufferRef videoSb = [_readerOutput copyNextSampleBuffer];
               if (!videoSb) {
                   [self rebuildReader];
@@ -127,7 +123,6 @@ jobs:
                   if (!videoSb) return NULL;
               }
               
-              // 2. 读取原相机的宽高和格式
               CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(originalBuffer);
               if (!originalImage) { CFRelease(videoSb); return NULL; }
               
@@ -136,24 +131,20 @@ jobs:
               OSType pixelFormat = CVPixelBufferGetPixelFormatType(originalImage);
               CMFormatDescriptionRef originalFormat = CMSampleBufferGetFormatDescription(originalBuffer);
               
-              // 3. 取假帧图像
               CVPixelBufferRef videoImage = CMSampleBufferGetImageBuffer(videoSb);
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:videoImage];
               
-              // 4. 严格按照原相机比例缩放（防止拉伸）
               CGFloat scaleX = targetWidth / ciImage.extent.size.width;
               CGFloat scaleY = targetHeight / ciImage.extent.size.height;
               ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
               ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, targetWidth, targetHeight)];
               
-              // 读取 UI 配置
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
               if ([defaults boolForKey:@"VCamMirror"]) {
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(targetWidth, 0)];
               }
               
-              // 5. 渲染到与原相机完全一致的 PixelBuffer 中
               CFDictionaryRef emptyAttrs = (__bridge CFDictionaryRef)@{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
               CVPixelBufferRef newBuf = NULL;
               CVPixelBufferCreate(kCFAllocatorDefault, targetWidth, targetHeight, pixelFormat, emptyAttrs, &newBuf);
@@ -161,7 +152,6 @@ jobs:
                   [_ciContext render:ciImage toCVPixelBuffer:newBuf];
               }
               
-              // 6. 包装成新的 CMSampleBuffer，并强行继承原相机的格式
               CMSampleTimingInfo timing = { 
                   .duration = CMTimeMake(1, 30), 
                   .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()), 
@@ -170,7 +160,6 @@ jobs:
               CMSampleBufferRef finalSb = NULL;
               CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, originalFormat, &timing, &finalSb);
               
-              // 7. 继承原相机的附件（防止某些 App 报错）
               CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
               if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
                   CFDictionaryRef attachments = CFArrayGetValueAtIndex(attachmentsArray, 0);
@@ -184,7 +173,6 @@ jobs:
           @end
           EOF
 
-          # === UI 与 Hook ===
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
@@ -309,8 +297,14 @@ jobs:
               return YES;
           }
 
-          - (void)expandPanel { self.panel.hidden = NO; [self.previewPlayer play]; }
-          - (void)minimizePanel { self.panel.hidden = YES; [self.previewPlayer pause]; }
+          - (void)expandPanel { 
+              self.panel.hidden = NO; 
+              [self.previewPlayer play]; 
+          }
+          - (void)minimizePanel { 
+              self.panel.hidden = YES; 
+              [self.previewPlayer pause]; 
+          }
 
           - (void)refreshUI {
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
@@ -433,13 +427,21 @@ jobs:
           }
 
           static NSTimeInterval lastVolUpTime = 0;
+
           %hook SBVolumeControl
-          - (void)increaseVolume { %orig; lastVolUpTime = [[NSDate date] timeIntervalSince1970]; }
+          - (void)increaseVolume {
+              %orig;
+              lastVolUpTime = [[NSDate date] timeIntervalSince1970];
+          }
           - (void)decreaseVolume {
               %orig;
               NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
               if (now - lastVolUpTime < 0.5) {
-                  if (floatWindow) dispatch_async(dispatch_get_main_queue(), ^{ floatWindow.hidden = !floatWindow.hidden; });
+                  if (floatWindow) {
+                      dispatch_async(dispatch_get_main_queue(), ^{ 
+                          floatWindow.hidden = !floatWindow.hidden; 
+                      });
+                  }
                   lastVolUpTime = 0;
               }
           }
