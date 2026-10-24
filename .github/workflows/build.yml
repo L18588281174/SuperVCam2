@@ -29,9 +29,9 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 13.0.0
+          Version: 15.0.0
           Architecture: iphoneos-arm64
-          Description: Global Virtual Camera with Shortcut Keys
+          Description: Pro Virtual Camera with Passthrough Window
           Maintainer: yourname
           Author: yourname
           Section: Tweaks
@@ -172,11 +172,10 @@ jobs:
           #import <UIKit/UIKit.h>
           #import <PhotosUI/PhotosUI.h>
           #import <objc/runtime.h>
-          #import <objc/message.h>
           #import "VCFrameEngine.h"
 
-          // ================= UI 界面 =================
-          @interface VCamWindow : UIWindow
+          // ================= 独立穿透窗口（核心防检测黑科技） =================
+          @interface VCamPassthroughWindow : UIWindow
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UIButton *ballBtn;
           @property (nonatomic, strong) UIButton *mainSwitchBtn;
@@ -184,10 +183,20 @@ jobs:
           @property (nonatomic, assign) BOOL hasVideo;
           @end
 
-          @interface VCamWindow () <PHPickerViewControllerDelegate>
+          @interface VCamPassthroughWindow () <PHPickerViewControllerDelegate>
           @end
 
-          @implementation VCamWindow
+          @implementation VCamPassthroughWindow
+          
+          // 让悬浮窗对底层录屏和推流不可见！
+          - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+              UIView *hitView = [super hitTest:point withEvent:event];
+              if (hitView == self || hitView == self.rootViewController.view) {
+                  return nil; // 窗口背景不拦截触摸
+              }
+              return hitView;
+          }
+
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
@@ -215,7 +224,7 @@ jobs:
                   [self.rootViewController.view addSubview:self.panel];
                   
                   UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-                  [self.ballBtn addGestureRecognizer:pan]; // 只允许拖动球
+                  [self.ballBtn addGestureRecognizer:pan];
                   
                   UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 200, 20)];
                   title.text = @"SuperVCam 控制台";
@@ -321,7 +330,6 @@ jobs:
           - (void)handlePan:(UIPanGestureRecognizer *)pan {
               CGPoint translation = [pan translationInView:self];
               CGPoint newCenter = CGPointMake(self.ballBtn.center.x + translation.x, self.ballBtn.center.y + translation.y);
-              // 球和面板一起移动
               self.panel.center = CGPointMake(self.panel.center.x + translation.x, self.panel.center.y + translation.y);
               self.ballBtn.center = newCenter;
               [pan setTranslation:CGPointZero inView:self];
@@ -362,12 +370,12 @@ jobs:
           }
           @end
 
-          static VCamWindow *floatWindow = nil;
+          static VCamPassthroughWindow *floatWindow = nil;
 
           static void setupGlobalUI() {
               dispatch_async(dispatch_get_main_queue(), ^{
                   if (!floatWindow) {
-                      floatWindow = [[VCamWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                      floatWindow = [[VCamPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                       floatWindow.ballBtn.center = CGPointMake(50, 150);
                       floatWindow.panel.center = [UIScreen mainScreen].center;
                       floatWindow.hidden = NO;
@@ -375,7 +383,7 @@ jobs:
               });
           }
 
-          // ================= 终极组合键控制 =================
+          // ================= 音量键组合监听 =================
           static NSTimeInterval lastVolUpTime = 0;
 
           %hook SBVolumeControl
@@ -386,14 +394,13 @@ jobs:
           - (void)decreaseVolume {
               %orig;
               NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-              // 如果在 0.5 秒内，先按了加，再按了减
               if (now - lastVolUpTime < 0.5) {
                   if (floatWindow) {
                       dispatch_async(dispatch_get_main_queue(), ^{
-                          floatWindow.hidden = !floatWindow.hidden; // 切换整个窗口显示/隐藏
+                          floatWindow.hidden = !floatWindow.hidden;
                       });
                   }
-                  lastVolUpTime = 0; // 重置，防止连发
+                  lastVolUpTime = 0;
               }
           }
           %end
