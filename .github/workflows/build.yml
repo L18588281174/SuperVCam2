@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 17.0.0
+          Version: 18.0.0
           Architecture: iphoneos-arm64
           Description: Ultimate Virtual Camera
           Maintainer: yourname
@@ -49,7 +49,7 @@ jobs:
           }
           EOF
 
-          # === 核心引擎：直接劫持时间戳透传，不进行任何画质重渲染 ===
+          # === 核心引擎：强行对齐原相机的格式与附件 ===
           cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -62,18 +62,19 @@ jobs:
           @property (nonatomic, strong) AVAudioPlayer *audioPlayer;
           - (void)loadVideoURL:(NSURL *)url;
           - (void)toggleAudio:(BOOL)play;
-          - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED;
+          - (CMSampleBufferRef)processSampleBuffer:(CMSampleBufferRef)originalBuffer CF_RETURNS_RETAINED;
           @end
           EOF
 
           cat > VCFrameEngine.m << 'EOF'
+          #import <CoreImage/CoreImage.h>
           #import "VCFrameEngine.h"
 
           @interface VCFrameEngine () {
               AVAssetReader *_reader;
               AVAssetReaderTrackOutput *_readerOutput;
               NSURL *_videoURL;
-              CMTime _offsetTime;
+              CIContext *_ciContext;
           }
           @end
 
@@ -87,20 +88,27 @@ jobs:
           - (instancetype)init {
               self = [super init];
               if (self) {
-                  _offsetTime = kCMTimeZero;
+                  _rotateAngle = 0;
+                  // 使用 Metal 加速渲染，极大降低 CPU 占用
+                  _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
               }
               return self;
           }
           - (void)loadVideoURL:(NSURL *)url {
               _videoURL = url;
               [self rebuildReader];
-              if (_audioPlayer) { [_audioPlayer stop]; _audioPlayer = nil; }
-              _audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
-              _audioPlayer.numberOfLoops = -1;
-              [_audioPlayer prepareToPlay];
           }
           - (void)toggleAudio:(BOOL)play {
-              if (!_audioPlayer) return;
+              if (!_videoURL) return;
+              if (!_audioPlayer) {
+                  // 配置 AudioSession，允许后台和混音
+                  [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+                  [[AVAudioSession sharedInstance] setActive:YES error:nil];
+                  
+                  _audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:_videoURL error:nil];
+                  _audioPlayer.numberOfLoops = -1;
+                  [_audioPlayer prepareToPlay];
+              }
               if (play) [_audioPlayer play]; else [_audioPlayer pause];
           }
           - (void)rebuildReader {
@@ -110,7 +118,6 @@ jobs:
               _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
               AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
               if (track) {
-                  // 读取相机原生支持的 BGRA 格式，保证画面兼容性
                   _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
                       (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
                   }];
@@ -119,37 +126,75 @@ jobs:
                   [_reader startReading];
               }
           }
-          
-          // 终极黑科技：不重新渲染画面，直接拿原始帧，重写时间戳塞给系统！
-          - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED {
+
+          // === 关键：劫持并重写 ===
+          - (CMSampleBufferRef)processSampleBuffer:(CMSampleBufferRef)originalBuffer CF_RETURNS_RETAINED {
               if (!_isEnabled || !_videoURL) return NULL;
               if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
               
-              CMSampleBufferRef sb = [_readerOutput copyNextSampleBuffer];
-              if (!sb) {
-                  // 视频播放完毕，循环重置
+              // 1. 获取我们视频的下一帧
+              CMSampleBufferRef videoSb = [_readerOutput copyNextSampleBuffer];
+              if (!videoSb) {
+                  // 如果视频播完了，循环读取
                   [self rebuildReader];
-                  sb = [_readerOutput copyNextSampleBuffer];
-                  if (!sb) return NULL;
+                  videoSb = [_readerOutput copyNextSampleBuffer];
+                  if (!videoSb) return NULL;
               }
               
-              // 提取原画质像素
-              CVImageBufferRef imgBuf = CMSampleBufferGetImageBuffer(sb);
+              // 2. 获取原相机画面的尺寸和格式描述（极其重要）
+              CMFormatDescriptionRef originalFormat = CMSampleBufferGetFormatDescription(originalBuffer);
+              CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(originalBuffer);
+              size_t targetWidth = CVPixelBufferGetWidth(originalImage);
+              size_t targetHeight = CVPixelBufferGetHeight(originalImage);
               
-              // 使用当前的系统时钟强制重写时间戳，让相机以为是实时采集的数据
-              CMTime now = CMClockGetTime(CMClockGetHostTimeClock());
-              CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = now, .decodeTimeStamp = kCMTimeInvalid };
+              // 3. 将视频帧转换为 CIImage 并处理缩放/镜像
+              CIImage *ciImage = [CIImage imageWithCVPixelBuffer:CMSampleBufferGetImageBuffer(videoSb)];
+              
+              // 按比例缩放到相机的目标尺寸
+              CGFloat scaleX = targetWidth / ciImage.extent.size.width;
+              CGFloat scaleY = targetHeight / ciImage.extent.size.height;
+              ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+              
+              if (_mirrorH) {
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(targetWidth, 0)];
+              }
+              
+              // 4. 创建新的 CVPixelBuffer，格式直接用原相机的格式
+              CFDictionaryRef emptyAttrs = (__bridge CFDictionaryRef)@{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
+              CVPixelBufferRef newBuf = NULL;
+              OSType pixelFormat = CVPixelBufferGetPixelFormatType(originalImage);
+              CVPixelBufferCreate(kCFAllocatorDefault, targetWidth, targetHeight, pixelFormat, emptyAttrs, &newBuf);
+              
+              // 5. 渲染视频画面到新 buffer 里
+              if (newBuf) {
+                  // 确保裁剪到目标尺寸，防止越界
+                  ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, targetWidth, targetHeight)];
+                  [_ciContext render:ciImage toCVPixelBuffer:newBuf];
+              }
+              
+              // 6. 用原相机的格式封装我们的画面，强行继承原时间戳和附件
+              CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(originalBuffer), .decodeTimeStamp = kCMTimeInvalid };
               
               CMSampleBufferRef finalSb = NULL;
-              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, imgBuf, CMSampleBufferGetFormatDescription(sb), &timing, &finalSb);
+              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, originalFormat, &timing, &finalSb);
               
-              CFRelease(sb);
+              // 7. 继承原相机的 attachments（否则底层会认为画面无效）
+              CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
+              if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+                  CFDictionaryRef attachments = CFArrayGetValueAtIndex(attachmentsArray, 0);
+                  CMSetAttachments(finalSb, attachments, kCMAttachmentMode_ShouldPropagate);
+              }
+              
+              if (newBuf) CVPixelBufferRelease(newBuf);
+              CFRelease(videoSb);
+              
               return finalSb;
           }
           @end
           EOF
 
-          # === UI 界面：带 AVPlayer 预览功能 ===
+          # === UI 界面 ===
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
@@ -234,7 +279,6 @@ jobs:
                   [pickBtn addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:pickBtn];
                   
-                  // 预览容器
                   self.previewContainer = [[UIView alloc] initWithFrame:CGRectMake(15, 90, 270, 80)];
                   self.previewContainer.backgroundColor = [UIColor blackColor];
                   self.previewContainer.layer.cornerRadius = 8;
@@ -278,11 +322,11 @@ jobs:
 
           - (void)expandPanel { 
               self.panel.hidden = NO; 
-              [self.previewPlayer play]; // 打开面板播放预览
+              [self.previewPlayer play];
           }
           - (void)minimizePanel { 
               self.panel.hidden = YES; 
-              [self.previewPlayer pause]; // 关闭面板暂停预览，省电
+              [self.previewPlayer pause];
           }
 
           - (void)refreshUI {
@@ -323,7 +367,7 @@ jobs:
                   NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
                   if (savedPath) {
                       [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-                      [[VCFrameEngine shared] toggleAudio:YES]; // 开启时默认放声音
+                      [[VCFrameEngine shared] toggleAudio:YES];
                   }
               } else {
                   [[VCFrameEngine shared] toggleAudio:NO];
@@ -335,7 +379,9 @@ jobs:
 
           - (void)handleGridTap:(UIButton *)sender {
               NSInteger tag = sender.tag;
-              if (tag == 0) [[VCFrameEngine shared] toggleAudio:![VCFrameEngine shared].audioPlayer.isPlaying];
+              if (tag == 0) {
+                  [[VCFrameEngine shared] toggleAudio:![VCFrameEngine shared].audioPlayer.isPlaying];
+              }
               else if (tag == 2) {
                   [VCFrameEngine shared].rotateAngle = ([VCFrameEngine shared].rotateAngle + 90) % 360;
               } else if (tag == 3) {
@@ -385,9 +431,8 @@ jobs:
                                   [[VCFrameEngine shared] loadVideoURL:destURL];
                                   [VCFrameEngine shared].isEnabled = NO;
                                   
-                                  // === 初始化 AVPlayer 预览 ===
                                   self.previewPlayer = [AVPlayer playerWithURL:destURL];
-                                  self.previewPlayer.muted = NO; // 预览带声音
+                                  self.previewPlayer.muted = NO;
                                   self.previewLayer.player = self.previewPlayer;
                                   [self.previewPlayer play];
                                   
@@ -437,7 +482,8 @@ jobs:
           @end
           @implementation VCFrameInterceptor
           - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-              CMSampleBufferRef vBuf = [[VCFrameEngine shared] nextSampleBuffer];
+              // 调用终极替换引擎
+              CMSampleBufferRef vBuf = [[VCFrameEngine shared] processSampleBuffer:sampleBuffer];
               if (vBuf) {
                   [self.realDelegate captureOutput:output didOutputSampleBuffer:vBuf fromConnection:connection];
                   CFRelease(vBuf);
@@ -453,6 +499,9 @@ jobs:
               NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
               if (savedPath && [VCFrameEngine shared].isEnabled) {
                   [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
+                  [[VCFrameEngine shared] toggleAudio:YES];
+              } else {
+                  [[VCFrameEngine shared] toggleAudio:NO];
               }
           }
 
