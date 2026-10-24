@@ -29,9 +29,9 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 15.0.3
+          Version: 16.0.0
           Architecture: iphoneos-arm64
-          Description: Pro Virtual Camera with Passthrough Window
+          Description: Pro Virtual Camera with Preview
           Maintainer: yourname
           Author: yourname
           Section: Tweaks
@@ -59,8 +59,10 @@ jobs:
           @property (nonatomic, assign) BOOL mirrorH;
           @property (nonatomic, assign) NSInteger rotateAngle;
           @property (nonatomic, strong) AVAudioPlayer *audioPlayer;
+          @property (nonatomic, strong) NSString *currentVideoPath;
           - (void)loadVideoURL:(NSURL *)url;
           - (void)toggleAudio:(BOOL)play;
+          - (UIImage *)getFirstFrame;
           - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED;
           @end
           EOF
@@ -90,10 +92,12 @@ jobs:
               self = [super init];
               if (self) {
                   _rotateAngle = 0;
+                  // 修复格式：使用更通用的 420f 格式池
                   NSDictionary *attrs = @{
-                      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
                       (id)kCVPixelBufferWidthKey: @(1080),
-                      (id)kCVPixelBufferHeightKey: @(1920)
+                      (id)kCVPixelBufferHeightKey: @(1920),
+                      (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
                   };
                   CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)attrs, &_pool);
                   CVPixelBufferRef pb = NULL;
@@ -105,6 +109,7 @@ jobs:
           }
           - (void)loadVideoURL:(NSURL *)url {
               _videoURL = url;
+              _currentVideoPath = url.path;
               [self rebuildReader];
               if (_audioPlayer) { [_audioPlayer stop]; _audioPlayer = nil; }
               _audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
@@ -129,6 +134,19 @@ jobs:
                   [_reader addOutput:_readerOutput];
                   [_reader startReading];
               }
+          }
+          // 获取首帧预览图
+          - (UIImage *)getFirstFrame {
+              if (!_videoURL) return nil;
+              AVAsset *asset = [AVAsset assetWithURL:_videoURL];
+              AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+              gen.appliesPreferredTrackTransform = YES;
+              NSError *error = nil;
+              CGImageRef imgRef = [gen copyCGImageAtTime:kCMTimeZero actualTime:NULL error:&error];
+              if (error) return nil;
+              UIImage *img = [UIImage imageWithCGImage:imgRef];
+              CGImageRelease(imgRef);
+              return img;
           }
           - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED {
               if (!_isEnabled || !_videoURL) return NULL;
@@ -157,10 +175,16 @@ jobs:
               static CIContext *context = nil;
               if (!context) context = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
               [context render:ciImage toCVPixelBuffer:newBuf];
+              
+              // 用真实的相机格式重建 sampleBuffer
+              CMVideoFormatDescriptionRef newDesc = NULL;
+              CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, newBuf, &newDesc);
               CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()), .decodeTimeStamp = kCMTimeInvalid };
               CMSampleBufferRef finalSb = NULL;
-              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, _formatDesc, &timing, &finalSb);
+              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, newDesc, &timing, &finalSb);
+              
               CVPixelBufferRelease(newBuf);
+              if(newDesc) CFRelease(newDesc);
               CFRelease(sb);
               return finalSb;
           }
@@ -178,6 +202,7 @@ jobs:
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UIButton *ballBtn;
           @property (nonatomic, strong) UIButton *mainSwitchBtn;
+          @property (nonatomic, strong) UIImageView *previewView;
           @property (nonatomic, strong) NSMutableArray *gridButtons;
           @property (nonatomic, assign) BOOL hasVideo;
           @end
@@ -218,7 +243,8 @@ jobs:
                   [self.ballBtn addTarget:self action:@selector(expandPanel) forControlEvents:UIControlEventTouchUpInside];
                   [self.rootViewController.view addSubview:self.ballBtn];
                   
-                  self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 280)];
+                  // 加高面板
+                  self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 340)];
                   self.panel.backgroundColor = [UIColor colorWithRed:15/255.0 green:20/255.0 blue:30/255.0 alpha:0.95];
                   self.panel.layer.cornerRadius = 20;
                   self.panel.hidden = YES;
@@ -249,8 +275,18 @@ jobs:
                   [pickBtn addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:pickBtn];
                   
+                  // 新增：预览视图
+                  self.previewView = [[UIImageView alloc] initWithFrame:CGRectMake(15, 90, 270, 80)];
+                  self.previewView.backgroundColor = [UIColor blackColor];
+                  self.previewView.contentMode = UIViewContentModeScaleAspectFit;
+                  self.previewView.layer.cornerRadius = 8;
+                  self.previewView.clipsToBounds = YES;
+                  self.previewView.layer.borderWidth = 1;
+                  self.previewView.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.2].CGColor;
+                  [self.panel addSubview:self.previewView];
+                  
                   self.mainSwitchBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  self.mainSwitchBtn.frame = CGRectMake(15, 90, 270, 40);
+                  self.mainSwitchBtn.frame = CGRectMake(15, 180, 270, 40);
                   self.mainSwitchBtn.layer.cornerRadius = 8;
                   [self.mainSwitchBtn addTarget:self action:@selector(toggleMainSwitch) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:self.mainSwitchBtn];
@@ -259,7 +295,7 @@ jobs:
                   NSArray *titles = @[@"原声", @"循环", @"旋转", @"镜像", @"麦克风", @"重置"];
                   for (int i = 0; i < 6; i++) {
                       UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-                      btn.frame = CGRectMake(15 + (i%3) * 92, 150 + (i/3) * 50, 86, 40);
+                      btn.frame = CGRectMake(15 + (i%3) * 92, 240 + (i/3) * 45, 86, 35); // 上移网格
                       btn.layer.cornerRadius = 8;
                       btn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
                       [btn setTitle:titles[i] forState:UIControlStateNormal];
@@ -366,7 +402,7 @@ jobs:
                   if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
                       [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
                           if (url) {
-                              // 绝对共享目录，无视沙盒
+                              // 超级路径：直接存在 /tmp 目录，所有进程 100% 有权限访问
                               NSString *destPath = @"/tmp/vcam_video.mp4";
                               NSURL *destURL = [NSURL fileURLWithPath:destPath];
                               
@@ -375,7 +411,7 @@ jobs:
                               [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:&copyErr];
                               
                               if (copyErr) {
-                                  NSLog(@"[SuperVCam] 复制视频失败: %@", copyErr);
+                                  NSLog(@"[SuperVCam] 复制失败: %@", copyErr);
                               }
                               
                               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
@@ -386,6 +422,11 @@ jobs:
                               dispatch_async(dispatch_get_main_queue(), ^{
                                   [[VCFrameEngine shared] loadVideoURL:destURL];
                                   [VCFrameEngine shared].isEnabled = NO;
+                                  
+                                  // === 新增：刷新预览图 ===
+                                  UIImage *firstFrame = [[VCFrameEngine shared] getFirstFrame];
+                                  self.previewView.image = firstFrame;
+                                  
                                   [self refreshUI];
                               });
                           }
