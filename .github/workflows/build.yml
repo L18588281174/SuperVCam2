@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 15.0.1
+          Version: 15.0.2
           Architecture: iphoneos-arm64
           Description: Pro Virtual Camera with Passthrough Window
           Maintainer: yourname
@@ -167,7 +167,6 @@ jobs:
           @end
           EOF
 
-          
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <UIKit/UIKit.h>
@@ -204,12 +203,10 @@ jobs:
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
                   
-                  // === 新增：全屏点击收起面板逻辑 ===
                   UITapGestureRecognizer *tapOutside = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(minimizePanel)];
                   tapOutside.cancelsTouchesInView = NO;
                   [self.rootViewController.view addGestureRecognizer:tapOutside];
 
-                  // 悬浮球
                   self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
                   self.ballBtn.frame = CGRectMake(0, 0, 50, 50);
                   self.ballBtn.backgroundColor = [UIColor colorWithRed:0 green:150/255.0 blue:255/255.0 alpha:0.8];
@@ -220,7 +217,6 @@ jobs:
                   [self.ballBtn addTarget:self action:@selector(expandPanel) forControlEvents:UIControlEventTouchUpInside];
                   [self.rootViewController.view addSubview:self.ballBtn];
                   
-                  // 面板
                   self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 280)];
                   self.panel.backgroundColor = [UIColor colorWithRed:15/255.0 green:20/255.0 blue:30/255.0 alpha:0.95];
                   self.panel.layer.cornerRadius = 20;
@@ -314,7 +310,6 @@ jobs:
               [defaults setBool:[VCFrameEngine shared].isEnabled forKey:@"VCamEnabled"];
               [defaults synchronize];
               
-              // 如果开启，确保相机进程重新读取视频
               if ([VCFrameEngine shared].isEnabled) {
                   NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
                   if (savedPath) {
@@ -363,7 +358,6 @@ jobs:
                   if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
                       [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
                           if (url) {
-                              // ======= 终极修复：强制存入绝对公共路径 =======
                               NSString *vcamDir = @"/var/mobile/Documents/vcam";
                               [[NSFileManager defaultManager] createDirectoryAtPath:vcamDir withIntermediateDirectories:YES attributes:nil error:nil];
                               NSString *destPath = [vcamDir stringByAppendingPathComponent:@"video.mp4"];
@@ -440,7 +434,6 @@ jobs:
           static void handleCrossProcessNotify(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
               [VCFrameEngine shared].isEnabled = [defaults boolForKey:@"VCamEnabled"];
-              // 收到通知时，强刷一次视频路径
               NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
               if (savedPath && [VCFrameEngine shared].isEnabled) {
                   [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
@@ -472,7 +465,6 @@ jobs:
                   }
               }
           }
-          EOF
           EOF
 
       - name: Build
