@@ -1,0 +1,193 @@
+name: Build SuperVCam Pro
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        run: |
+          brew install ldid xz
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=~/theos" >> $GITHUB_ENV
+      - name: Generate Source Files
+        run: |
+          mkdir -p .github/workflows
+          # ================= 插件核心代码 =================
+          cat > Makefile << 'EOF'
+          ARCHS = arm64
+          TARGET = iphone:clang:latest:15.0
+          THEOS_PACKAGE_SCHEME = rootless
+          include $(THEOS)/makefiles/common.mk
+          TWEAK_NAME = SuperVCam
+          SuperVCam_FILES = Tweak.x VCFrameEngine.m
+          SuperVCam_FRAMEWORKS = AVFoundation CoreMedia CoreVideo CoreImage UIKit Foundation PhotosUI Photos AudioToolbox
+          SuperVCam_CFLAGS = -fobjc-arc
+          include $(THEOS_MAKE_PATH)/tweak.mk
+          EOF
+
+          cat > control << 'EOF'
+          Package: com.yourname.supervcam
+          Name: SuperVCam
+          Version: 2.0.0
+          Architecture: iphoneos-arm64
+          Description: Ultimate Virtual Camera
+          Maintainer: yourname
+          Author: yourname
+          Section: Tweaks
+          Depends: mobilesubstrate
+          EOF
+
+          cat > SuperVCam.plist << 'EOF'
+          {
+              Filter = {
+                  Bundles = (
+                      "com.apple.camera"
+                  );
+              };
+          }
+          EOF
+
+          cat > VCFrameEngine.h << 'EOF'
+          #import <Foundation/Foundation.h>
+          #import <AVFoundation/AVFoundation.h>
+          #import <UIKit/UIKit.h>
+          @interface VCFrameEngine : NSObject
+          + (instancetype)shared;
+          @property (nonatomic, assign) BOOL isEnabled;
+          @property (nonatomic, assign) BOOL mirrorH;
+          - (void)loadVideoURL:(NSURL *)url;
+          - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED;
+          @end
+          EOF
+
+          cat > VCFrameEngine.m << 'EOF'
+          #import <QuartzCore/QuartzCore.h>
+          #import <CoreImage/CoreImage.h>
+          #import "VCFrameEngine.h"
+
+          @interface VCFrameEngine () {
+              AVAssetReader *_reader;
+              AVAssetReaderTrackOutput *_readerOutput;
+              NSURL *_videoURL;
+              CVPixelBufferPoolRef _pool;
+              CMVideoFormatDescriptionRef _formatDesc;
+          }
+          @end
+
+          @implementation VCFrameEngine
+          + (instancetype)shared {
+              static VCFrameEngine *inst;
+              static dispatch_once_t once;
+              dispatch_once(&once, ^{ inst = [VCFrameEngine new]; });
+              return inst;
+          }
+          - (instancetype)init {
+              self = [super init];
+              if (self) {
+                  NSDictionary *attrs = @{
+                      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                      (id)kCVPixelBufferWidthKey: @(1080),
+                      (id)kCVPixelBufferHeightKey: @(1920)
+                  };
+                  CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)attrs, &_pool);
+                  CVPixelBufferRef pb = NULL;
+                  CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &pb);
+                  CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pb, &_formatDesc);
+                  CVPixelBufferRelease(pb);
+              }
+              return self;
+          }
+          - (void)loadVideoURL:(NSURL *)url {
+              _videoURL = url;
+              [self rebuildReader];
+          }
+          - (void)rebuildReader {
+              [_reader cancelReading];
+              AVAsset *asset = [AVAsset assetWithURL:_videoURL];
+              _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
+              AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+              if (track) {
+                  _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
+                      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
+                  }];
+                  _readerOutput.alwaysCopiesSampleData = NO;
+                  [_reader addOutput:_readerOutput];
+                  [_reader startReading];
+              }
+          }
+          - (CMSampleBufferRef)nextSampleBuffer CF_RETURNS_RETAINED {
+              if (!_isEnabled || !_videoURL) return NULL;
+              if (!_reader || _reader.status != AVAssetReaderStatusReading) {
+                  [self rebuildReader];
+              }
+              CMSampleBufferRef sb = [_readerOutput copyNextSampleBuffer];
+              if (!sb) {
+                  [self rebuildReader];
+                  sb = [_readerOutput copyNextSampleBuffer];
+                  if (!sb) return NULL;
+              }
+              CVPixelBufferRef imgBuf = CMSampleBufferGetImageBuffer(sb);
+              CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imgBuf];
+              if (_mirrorH) {
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(1080, 0)];
+              }
+              CVPixelBufferRef newBuf = NULL;
+              CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &newBuf);
+              static CIContext *context = nil;
+              if (!context) context = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+              [context render:ciImage toCVPixelBuffer:newBuf];
+              CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = CMClockGetTime(CMClockGetHostTimeClock()), .decodeTimeStamp = kCMTimeInvalid };
+              CMSampleBufferRef finalSb = NULL;
+              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, _formatDesc, &timing, &finalSb);
+              CVPixelBufferRelease(newBuf);
+              CFRelease(sb);
+              return finalSb;
+          }
+          @end
+          EOF
+
+          cat > Tweak.x << 'EOF'
+          #import <AVFoundation/AVFoundation.h>
+          #import "VCFrameEngine.h"
+
+          @interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+          @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
+          @end
+          @implementation VCFrameInterceptor
+          - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+              CMSampleBufferRef vBuf = [[VCFrameEngine shared] nextSampleBuffer];
+              if (vBuf) {
+                  [self.realDelegate captureOutput:output didOutputSampleBuffer:vBuf fromConnection:connection];
+                  CFRelease(vBuf);
+              } else {
+                  [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+              }
+          }
+          @end
+
+          %hook AVCaptureVideoDataOutput
+          - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
+              if (!delegate) { %orig; return; }
+              NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
+              if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
+                  [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
+                  [VCFrameEngine shared].isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
+                  [VCFrameEngine shared].mirrorH = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"];
+              }
+              VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
+              interceptor.realDelegate = delegate;
+              %orig(interceptor, queue);
+          }
+          %end
+          EOF
+
+      - name: Build Tweak
+        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: Upload Deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuperVCam-Deb
+          path: packages/*.deb
