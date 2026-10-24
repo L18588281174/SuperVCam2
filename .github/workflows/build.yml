@@ -174,7 +174,6 @@ jobs:
           #import <objc/runtime.h>
           #import "VCFrameEngine.h"
 
-          // ================= 独立穿透窗口（核心防检测黑科技） =================
           @interface VCamPassthroughWindow : UIWindow
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UIButton *ballBtn;
@@ -188,11 +187,10 @@ jobs:
 
           @implementation VCamPassthroughWindow
           
-          // 让悬浮窗对底层录屏和推流不可见！
           - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
               UIView *hitView = [super hitTest:point withEvent:event];
               if (hitView == self || hitView == self.rootViewController.view) {
-                  return nil; // 窗口背景不拦截触摸
+                  return nil; 
               }
               return hitView;
           }
@@ -205,7 +203,6 @@ jobs:
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
                   
-                  // 悬浮球
                   self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
                   self.ballBtn.frame = CGRectMake(0, 0, 50, 50);
                   self.ballBtn.backgroundColor = [UIColor colorWithRed:0 green:150/255.0 blue:255/255.0 alpha:0.8];
@@ -216,7 +213,6 @@ jobs:
                   [self.ballBtn addTarget:self action:@selector(expandPanel) forControlEvents:UIControlEventTouchUpInside];
                   [self.rootViewController.view addSubview:self.ballBtn];
                   
-                  // 面板
                   self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 280)];
                   self.panel.backgroundColor = [UIColor colorWithRed:15/255.0 green:20/255.0 blue:30/255.0 alpha:0.95];
                   self.panel.layer.cornerRadius = 20;
@@ -377,13 +373,12 @@ jobs:
                   if (!floatWindow) {
                       floatWindow = [[VCamPassthroughWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                       floatWindow.ballBtn.center = CGPointMake(50, 150);
-                      floatWindow.panel.center = [UIScreen mainScreen].center;
+                      floatWindow.panel.center = CGPointMake([UIScreen mainScreen].bounds.size.width / 2, [UIScreen mainScreen].bounds.size.height / 2);
                       floatWindow.hidden = NO;
                   }
               });
           }
 
-          // ================= 音量键组合监听 =================
           static NSTimeInterval lastVolUpTime = 0;
 
           %hook SBVolumeControl
@@ -405,7 +400,6 @@ jobs:
           }
           %end
 
-          // ================= 相机拦截 =================
           @interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
           @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
           @end
