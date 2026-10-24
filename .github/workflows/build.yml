@@ -13,7 +13,7 @@ jobs:
       - name: Generate Source Files
         run: |
           mkdir -p .github/workflows
-          # ================= 插件核心代码 =================
+          
           cat > Makefile << 'EOF'
           ARCHS = arm64
           TARGET = iphone:clang:latest:15.0
@@ -150,51 +150,51 @@ jobs:
 
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
-#import <objc/runtime.h>
-#import "VCFrameEngine.h"
+          #import <objc/runtime.h>
+          #import "VCFrameEngine.h"
 
-@interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
-@property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
-@end
+          @interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+          @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
+          @end
 
-@implementation VCFrameInterceptor
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    CMSampleBufferRef vBuf = [[VCFrameEngine shared] nextSampleBuffer];
-    if (vBuf) {
-        [self.realDelegate captureOutput:output didOutputSampleBuffer:vBuf fromConnection:connection];
-        CFRelease(vBuf);
-    } else {
-        [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
-    }
-}
-@end
+          @implementation VCFrameInterceptor
+          - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+              CMSampleBufferRef vBuf = [[VCFrameEngine shared] nextSampleBuffer];
+              if (vBuf) {
+                  [self.realDelegate captureOutput:output didOutputSampleBuffer:vBuf fromConnection:connection];
+                  CFRelease(vBuf);
+              } else {
+                  [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+              }
+          }
+          @end
 
-__attribute__((constructor)) static void initVCam() {
-    Class cls = objc_getClass("AVCaptureVideoDataOutput");
-    SEL sel = sel_registerName("setSampleBufferDelegate:queue:");
-    Method method = class_getInstanceMethod(cls, sel);
-    if (!method) return;
+          __attribute__((constructor)) static void initVCam() {
+              Class cls = objc_getClass("AVCaptureVideoDataOutput");
+              SEL sel = sel_registerName("setSampleBufferDelegate:queue:");
+              Method method = class_getInstanceMethod(cls, sel);
+              if (!method) return;
 
-    IMP originalIMP = method_getImplementation(method);
-    IMP newIMP = imp_implementationWithBlock(^void(id _self, id delegate, dispatch_queue_t queue) {
-        if (!delegate) {
-            ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, delegate, queue);
-            return;
-        }
-        
-        NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
-        if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
-            [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-            [VCFrameEngine shared].isEnabled = YES;
-        }
-        
-        VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
-        interceptor.realDelegate = delegate;
-        ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, interceptor, queue);
-    });
-    
-    method_setImplementation(method, newIMP);
-}
+              IMP originalIMP = method_getImplementation(method);
+              IMP newIMP = imp_implementationWithBlock(^void(id _self, id delegate, dispatch_queue_t queue) {
+                  if (!delegate) {
+                      ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, delegate, queue);
+                      return;
+                  }
+                  
+                  NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
+                  if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
+                      [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
+                      [VCFrameEngine shared].isEnabled = YES;
+                  }
+                  
+                  VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
+                  interceptor.realDelegate = delegate;
+                  ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, interceptor, queue);
+              });
+              
+              method_setImplementation(method, newIMP);
+          }
           EOF
 
       - name: Build Tweak
