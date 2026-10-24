@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 15.0.0
+          Version: 15.0.1
           Architecture: iphoneos-arm64
           Description: Pro Virtual Camera with Passthrough Window
           Maintainer: yourname
@@ -346,10 +346,15 @@ jobs:
                   if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
                       [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
                           if (url) {
-                              NSString *destPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vcam_video.mp4"];
+                              // ======= 核心修复：保存到公共目录 =======
+                              NSString *docsDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+                              [[NSFileManager defaultManager] createDirectoryAtPath:docsDir withIntermediateDirectories:YES attributes:nil error:nil];
+                              NSString *destPath = [docsDir stringByAppendingPathComponent:@"vcam_video.mp4"];
                               NSURL *destURL = [NSURL fileURLWithPath:destPath];
+                              
                               [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
                               [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:&error];
+                              
                               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
                               [defaults setObject:destPath forKey:@"VCamVideoPath"];
                               [defaults setBool:NO forKey:@"VCamEnabled"];
