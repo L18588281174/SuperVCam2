@@ -153,6 +153,7 @@ jobs:
           #import <UIKit/UIKit.h>
           #import <PhotosUI/PhotosUI.h>
           #import <objc/runtime.h>
+          #import <objc/message.h>
           #import "VCFrameEngine.h"
 
           // 界面部分完全用标准 OC 写，避开 Logos
