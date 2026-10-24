@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 15.0.2
+          Version: 15.0.3
           Architecture: iphoneos-arm64
           Description: Pro Virtual Camera with Passthrough Window
           Maintainer: yourname
@@ -174,7 +174,7 @@ jobs:
           #import <objc/runtime.h>
           #import "VCFrameEngine.h"
 
-          @interface VCamPassthroughWindow : UIWindow
+          @interface VCamPassthroughWindow : UIWindow <UIGestureRecognizerDelegate>
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UIButton *ballBtn;
           @property (nonatomic, strong) UIButton *mainSwitchBtn;
@@ -205,6 +205,7 @@ jobs:
                   
                   UITapGestureRecognizer *tapOutside = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(minimizePanel)];
                   tapOutside.cancelsTouchesInView = NO;
+                  tapOutside.delegate = self;
                   [self.rootViewController.view addGestureRecognizer:tapOutside];
 
                   self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -271,6 +272,13 @@ jobs:
                   [self refreshUI];
               }
               return self;
+          }
+
+          - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+              if ([touch.view isDescendantOfView:self.panel]) {
+                  return NO;
+              }
+              return YES;
           }
 
           - (void)expandPanel { self.panel.hidden = NO; }
@@ -358,18 +366,23 @@ jobs:
                   if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
                       [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
                           if (url) {
-                              NSString *vcamDir = @"/var/mobile/Documents/vcam";
-                              [[NSFileManager defaultManager] createDirectoryAtPath:vcamDir withIntermediateDirectories:YES attributes:nil error:nil];
-                              NSString *destPath = [vcamDir stringByAppendingPathComponent:@"video.mp4"];
+                              // 绝对共享目录，无视沙盒
+                              NSString *destPath = @"/tmp/vcam_video.mp4";
                               NSURL *destURL = [NSURL fileURLWithPath:destPath];
                               
                               [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
-                              [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:&error];
+                              NSError *copyErr = nil;
+                              [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:&copyErr];
+                              
+                              if (copyErr) {
+                                  NSLog(@"[SuperVCam] 复制视频失败: %@", copyErr);
+                              }
                               
                               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
                               [defaults setObject:destPath forKey:@"VCamVideoPath"];
                               [defaults setBool:NO forKey:@"VCamEnabled"];
                               [defaults synchronize];
+                              
                               dispatch_async(dispatch_get_main_queue(), ^{
                                   [[VCFrameEngine shared] loadVideoURL:destURL];
                                   [VCFrameEngine shared].isEnabled = NO;
