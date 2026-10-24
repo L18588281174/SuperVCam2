@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 4.0.0
+          Version: 4.1.0
           Architecture: iphoneos-arm64
           Description: Ultimate Virtual Camera for Dopamine
           Maintainer: yourname
@@ -38,7 +38,6 @@ jobs:
           Depends: mobilesubstrate
           EOF
 
-          # 注意这里：同时注入系统相机和桌面（用于音量键呼出）
           cat > SuperVCam.plist << 'EOF'
           {
               Filter = {
@@ -153,9 +152,9 @@ jobs:
           #import <UIKit/UIKit.h>
           #import <PhotosUI/PhotosUI.h>
           #import <objc/runtime.h>
+          #import <objc/message.h>
           #import "VCFrameEngine.h"
 
-          // 这里直接用 UIView 做界面，不再用 UIWindow
           @interface VCamView : UIView
           @end
 
@@ -198,8 +197,16 @@ jobs:
               PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
               picker.delegate = (id<PHPickerViewControllerDelegate>)self;
               
-              UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-              [rootVC presentViewController:picker animated:YES completion:nil];
+              id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+              id window = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
+              if (!window) {
+                  NSArray *wins = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+                  if (wins.count > 0) window = wins.firstObject;
+              }
+              UIViewController *vc = ((UIViewController * (*)(id, SEL))objc_msgSend)(window, sel_registerName("rootViewController"));
+              while (vc.presentedViewController) vc = vc.presentedViewController;
+              
+              [vc presentViewController:picker animated:YES completion:nil];
           }
 
           - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
@@ -229,23 +236,28 @@ jobs:
 
           static VCamView *uiView = nil;
 
-          // 暴力获取顶层 Window
+          // 用底层 Runtime 绕过编译器的 keyWindow 废弃报错
           static UIWindow* getKeyWindow() {
               UIWindow *keyWindow = nil;
               if (@available(iOS 13.0, *)) {
-                  for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                      if (scene.activationState == UISceneActivationStateForegroundActive) {
-                          for (UIWindow *w in scene.windows) {
-                              if (w.isKeyWindow) { keyWindow = w; break; }
+                  id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                  NSArray *scenes = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
+                  for (id scene in scenes) {
+                      if (((NSInteger (*)(id, SEL))objc_msgSend)(scene, sel_registerName("activationState")) == 0) {
+                          NSArray *windows = ((NSArray * (*)(id, SEL))objc_msgSend)(scene, sel_registerName("windows"));
+                          for (UIWindow *w in windows) {
+                              if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) { keyWindow = w; break; }
                           }
                       }
                   }
               }
-              if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
+              if (!keyWindow) {
+                  id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+                  keyWindow = ((UIWindow * (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
+              }
               return keyWindow;
           }
 
-          // 强行把 UI 贴到屏幕上
           static void showUI() {
               dispatch_async(dispatch_get_main_queue(), ^{
                   UIWindow *window = getKeyWindow();
@@ -274,7 +286,6 @@ jobs:
           }
           @end
 
-          // Hook 相机输出
           __attribute__((constructor)) static void initVCam() {
               Class cls = objc_getClass("AVCaptureVideoDataOutput");
               SEL sel = sel_registerName("setSampleBufferDelegate:queue:");
@@ -299,12 +310,10 @@ jobs:
                   method_setImplementation(method, newIMP);
               }
 
-              // 延迟 2 秒强行弹出界面（应对刚打开相机时的场景加载）
               dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                   showUI();
               });
 
-              // 音量键监听
               [[NSNotificationCenter defaultCenter] addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification"
                                                                 object:nil
                                                                  queue:[NSOperationQueue mainQueue]
