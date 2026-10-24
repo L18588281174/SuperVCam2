@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 4.1.0
+          Version: 5.0.0
           Architecture: iphoneos-arm64
           Description: Ultimate Virtual Camera for Dopamine
           Maintainer: yourname
@@ -38,6 +38,7 @@ jobs:
           Depends: mobilesubstrate
           EOF
 
+          # 注入到相机和桌面，保证悬浮窗全局可用
           cat > SuperVCam.plist << 'EOF'
           {
               Filter = {
@@ -105,6 +106,7 @@ jobs:
           }
           - (void)rebuildReader {
               [_reader cancelReading];
+              if (!_videoURL) return;
               AVAsset *asset = [AVAsset assetWithURL:_videoURL];
               _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
               AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
@@ -155,62 +157,90 @@ jobs:
           #import <objc/message.h>
           #import "VCFrameEngine.h"
 
-          @interface VCamView : UIView
+          // 全局悬浮窗类
+          @interface VCamWindow : UIWindow
+          @property (nonatomic, strong) UIButton *toggleBtn;
+          @property (nonatomic, strong) UIButton *mirrorBtn;
           @end
 
-          @interface VCamView () <PHPickerViewControllerDelegate>
+          @interface VCamWindow () <PHPickerViewControllerDelegate>
           @end
 
-          @implementation VCamView
+          @implementation VCamWindow
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.9];
-                  self.layer.cornerRadius = 10;
+                  self.windowLevel = UIWindowLevelAlert + 1000;
+                  self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+                  self.layer.cornerRadius = 15;
                   self.clipsToBounds = YES;
+                  self.hidden = NO;
                   
+                  // 关闭/开启按钮
+                  self.toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                  self.toggleBtn.frame = CGRectMake(5, 5, 120, 35);
+                  [self.toggleBtn addTarget:self action:@selector(toggleVCam) forControlEvents:UIControlEventTouchUpInside];
+                  [self addSubview:self.toggleBtn];
+                  
+                  // 选视频按钮
                   UIButton *pickBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  pickBtn.frame = CGRectMake(10, 10, 120, 40);
-                  [pickBtn setTitle:@"相册选视频" forState:UIControlStateNormal];
+                  pickBtn.frame = CGRectMake(5, 45, 120, 35);
+                  [pickBtn setTitle:@"📷 相册选视频" forState:UIControlStateNormal];
                   [pickBtn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
                   [pickBtn addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self addSubview:pickBtn];
                   
-                  UIButton *toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  toggleBtn.frame = CGRectMake(10, 60, 120, 40);
-                  [toggleBtn setTitle:@"开启/关闭" forState:UIControlStateNormal];
-                  [toggleBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
-                  [toggleBtn addTarget:self action:@selector(toggleVCam) forControlEvents:UIControlEventTouchUpInside];
-                  [self addSubview:toggleBtn];
+                  // 镜像按钮
+                  self.mirrorBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                  self.mirrorBtn.frame = CGRectMake(5, 85, 120, 35);
+                  [self.mirrorBtn addTarget:self action:@selector(toggleMirror) forControlEvents:UIControlEventTouchUpInside];
+                  [self addSubview:self.mirrorBtn];
+                  
+                  [self updateUIStates];
               }
               return self;
           }
 
+          - (void)updateUIStates {
+              BOOL isEnabled = [VCFrameEngine shared].isEnabled;
+              [self.toggleBtn setTitle:isEnabled ? @"🟢 替换已开启" : @"🔴 替换已关闭" forState:UIControlStateNormal];
+              [self.toggleBtn setTitleColor:isEnabled ? [UIColor greenColor] : [UIColor redColor] forState:UIControlStateNormal];
+              
+              BOOL isMirror = [VCFrameEngine shared].mirrorH;
+              [self.mirrorBtn setTitle:isMirror ? @"↔️ 镜像: 开" : @"↔️ 镜像: 关" forState:UIControlStateNormal];
+              [self.mirrorBtn setTitleColor:isMirror ? [UIColor yellowColor] : [UIColor lightGrayColor] forState:UIControlStateNormal];
+          }
+
           - (void)toggleVCam {
               [VCFrameEngine shared].isEnabled = ![VCFrameEngine shared].isEnabled;
+              [[NSUserDefaults standardUserDefaults] setBool:[VCFrameEngine shared].isEnabled forKey:@"VCamEnabled"];
+              [[NSUserDefaults standardUserDefaults] synchronize];
+              [self updateUIStates];
+          }
+
+          - (void)toggleMirror {
+              [VCFrameEngine shared].mirrorH = ![VCFrameEngine shared].mirrorH;
+              [[NSUserDefaults standardUserDefaults] setBool:[VCFrameEngine shared].mirrorH forKey:@"VCamMirror"];
+              [[NSUserDefaults standardUserDefaults] synchronize];
+              [self updateUIStates];
           }
 
           - (void)pickVideo {
-              self.hidden = YES;
+              self.hidden = YES; // 临时隐藏去选视频
               PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
               config.filter = PHPickerFilter.videosFilter;
               PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
               picker.delegate = (id<PHPickerViewControllerDelegate>)self;
               
-              id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
-              id window = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
-              if (!window) {
-                  NSArray *wins = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
-                  if (wins.count > 0) window = wins.firstObject;
-              }
-              UIViewController *vc = ((UIViewController * (*)(id, SEL))objc_msgSend)(window, sel_registerName("rootViewController"));
-              while (vc.presentedViewController) vc = vc.presentedViewController;
-              
+              UIViewController *vc = ((UIViewController * (*)(id, SEL))objc_msgSend)(self.rootViewController, sel_registerName("presentedViewController"));
+              if (!vc) vc = self.rootViewController;
               [vc presentViewController:picker animated:YES completion:nil];
           }
 
           - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
               [picker dismissViewControllerAnimated:YES completion:nil];
+              self.hidden = NO;
+              
               if (results.count > 0) {
                   NSItemProvider *provider = results.firstObject.itemProvider;
                   if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
@@ -220,23 +250,26 @@ jobs:
                               NSURL *destURL = [NSURL fileURLWithPath:destPath];
                               [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
                               [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:nil];
+                              
                               [[NSUserDefaults standardUserDefaults] setObject:destPath forKey:@"VCamVideoPath"];
+                              [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"VCamEnabled"];
                               [[NSUserDefaults standardUserDefaults] synchronize];
+                              
                               dispatch_async(dispatch_get_main_queue(), ^{
                                   [[VCFrameEngine shared] loadVideoURL:destURL];
                                   [VCFrameEngine shared].isEnabled = YES;
+                                  [self updateUIStates];
                               });
                           }
                       }];
                   }
               }
-              self.hidden = NO;
           }
           @end
 
-          static VCamView *uiView = nil;
+          static VCamWindow *floatWindow = nil;
 
-          // 用底层 Runtime 绕过编译器的 keyWindow 废弃报错
+          // 获取顶层控制器
           static UIWindow* getKeyWindow() {
               UIWindow *keyWindow = nil;
               if (@available(iOS 13.0, *)) {
@@ -258,16 +291,17 @@ jobs:
               return keyWindow;
           }
 
+          // 显示悬浮窗
           static void showUI() {
               dispatch_async(dispatch_get_main_queue(), ^{
-                  UIWindow *window = getKeyWindow();
-                  if (window) {
-                      if (!uiView) {
-                          uiView = [[VCamView alloc] initWithFrame:CGRectMake(20, 100, 140, 110)];
-                      }
-                      [window addSubview:uiView];
-                      [window bringSubviewToFront:uiView];
+                  if (!floatWindow) {
+                      floatWindow = [[VCamWindow alloc] initWithFrame:CGRectMake(20, 100, 130, 125)];
+                      // 让 window 拥有 rootViewController 才能弹相册
+                      floatWindow.rootViewController = [[UIViewController alloc] init];
+                      floatWindow.rootViewController.view.backgroundColor = [UIColor clearColor];
                   }
+                  floatWindow.hidden = NO;
+                  [floatWindow makeKeyAndVisible];
               });
           }
 
@@ -287,6 +321,18 @@ jobs:
           @end
 
           __attribute__((constructor)) static void initVCam() {
+              // 启动时读取上次的配置
+              [[VCFrameEngine shared] setIsEnabled:[[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"]];
+              [[VCFrameEngine shared] setMirrorH:[[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"]];
+              NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
+              if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
+                  [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
+              }
+
+              // 启动就显示悬浮窗
+              showUI();
+
+              // Hook 相机
               Class cls = objc_getClass("AVCaptureVideoDataOutput");
               SEL sel = sel_registerName("setSampleBufferDelegate:queue:");
               Method method = class_getInstanceMethod(cls, sel);
@@ -297,33 +343,23 @@ jobs:
                           ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, delegate, queue);
                           return;
                       }
-                      NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
-                      if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
-                          [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-                          [VCFrameEngine shared].isEnabled = YES;
-                      }
                       VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
                       interceptor.realDelegate = delegate;
                       ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, interceptor, queue);
-                      showUI();
+                      showUI(); // 每次打开相机确保悬浮窗在最前面
                   });
                   method_setImplementation(method, newIMP);
               }
 
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                  showUI();
-              });
-
+              // 音量键切换显示/隐藏
               [[NSNotificationCenter defaultCenter] addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification"
                                                                 object:nil
                                                                  queue:[NSOperationQueue mainQueue]
                                                             usingBlock:^(NSNotification *note) {
                   NSString *reason = note.userInfo[@"AVSystemController_AudioVolumeChangeReasonNotificationParameter"];
                   if ([reason isEqualToString:@"ExplicitVolumeChange"]) {
-                      if (uiView) {
-                          uiView.hidden = !uiView.hidden;
-                      } else {
-                          showUI();
+                      if (floatWindow) {
+                          floatWindow.hidden = !floatWindow.hidden;
                       }
                   }
               }];
