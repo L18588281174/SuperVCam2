@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 10.0.0
+          Version: 10.0.1
           Architecture: iphoneos-arm64
           Description: Pro Virtual Camera with Audio & Full UI
           Maintainer: yourname
@@ -106,13 +106,12 @@ jobs:
           - (void)loadVideoURL:(NSURL *)url {
               _videoURL = url;
               [self rebuildReader];
-              // 初始化音频播放器
               if (_audioPlayer) {
                   [_audioPlayer stop];
                   _audioPlayer = nil;
               }
               _audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
-              _audioPlayer.numberOfLoops = -1; // 无限循环
+              _audioPlayer.numberOfLoops = -1;
               [_audioPlayer prepareToPlay];
           }
           - (void)toggleAudio:(BOOL)play {
@@ -146,13 +145,10 @@ jobs:
               }
               CVPixelBufferRef imgBuf = CMSampleBufferGetImageBuffer(sb);
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:imgBuf];
-              
-              // 镜像处理
               if (_mirrorH) {
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(1080, 0)];
               }
-              // 旋转处理
               if (_rotateAngle == 90) {
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeRotation(-M_PI_2)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(0, 1920)];
@@ -160,7 +156,6 @@ jobs:
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeRotation(M_PI)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(1080, 1920)];
               }
-
               CVPixelBufferRef newBuf = NULL;
               CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &newBuf);
               static CIContext *context = nil;
@@ -185,7 +180,6 @@ jobs:
           #import <objc/message.h>
           #import "VCFrameEngine.h"
 
-          // 商业级深色 UI
           @interface VCamView : UIView
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UILabel *titleLabel;
@@ -203,29 +197,24 @@ jobs:
               self = [super initWithFrame:frame];
               if (self) {
                   self.backgroundColor = [UIColor clearColor];
-                  
-                  // 主面板
                   self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 300, 260)];
                   self.panel.backgroundColor = [UIColor colorWithRed:15/255.0 green:20/255.0 blue:30/255.0 alpha:0.95];
                   self.panel.layer.cornerRadius = 20;
                   self.panel.clipsToBounds = YES;
                   [self addSubview:self.panel];
                   
-                  // 拖拽与折叠
                   UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
                   [self.panel addGestureRecognizer:pan];
                   UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleMinimize)];
                   doubleTap.numberOfTapsRequired = 2;
                   [self.panel addGestureRecognizer:doubleTap];
                   
-                  // 标题
                   self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 200, 20)];
                   self.titleLabel.text = @"实时替换工具 - 定制版";
                   self.titleLabel.textColor = [UIColor cyanColor];
                   self.titleLabel.font = [UIFont boldSystemFontOfSize:14];
                   [self.panel addSubview:self.titleLabel];
                   
-                  // 选视频大按钮
                   self.pickBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                   self.pickBtn.frame = CGRectMake(15, 40, 270, 40);
                   self.pickBtn.backgroundColor = [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:1];
@@ -235,7 +224,6 @@ jobs:
                   [self.pickBtn addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:self.pickBtn];
                   
-                  // 取消视频大按钮
                   self.cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                   self.cancelBtn.frame = CGRectMake(15, 90, 270, 40);
                   self.cancelBtn.backgroundColor = [UIColor colorWithRed:1 green:59/255.0 blue:48/255.0 alpha:1];
@@ -245,7 +233,6 @@ jobs:
                   [self.cancelBtn addTarget:self action:@selector(cancelVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:self.cancelBtn];
                   
-                  // 功能网格
                   self.gridButtons = [NSMutableArray array];
                   NSArray *titles = @[@"原声", @"循环", @"旋转", @"镜像", @"静音麦", @"重置"];
                   for (int i = 0; i < 6; i++) {
@@ -263,7 +250,6 @@ jobs:
                       [self.gridButtons addObject:btn];
                   }
                   
-                  // 收起按钮
                   UIButton *collapseBtn = [UIButton buttonWithType:UIButtonTypeSystem];
                   collapseBtn.frame = CGRectMake(110, 240, 80, 30);
                   [collapseBtn setTitle:@"收起 ▼" forState:UIControlStateNormal];
@@ -277,15 +263,11 @@ jobs:
           }
 
           - (void)refreshUI {
-              // 更新原声按钮 (Tag 0)
               BOOL isAudio = [VCFrameEngine shared].audioPlayer.isPlaying;
               [self updateBtn:0 text:isAudio ? @"🔊 原声: 开" : @"🔇 原声: 关" active:isAudio];
-              // 更新循环按钮 (Tag 1) - 默认开启
               [self updateBtn:1 text:@"🔁 循环: 开" active:YES];
-              // 更新旋转 (Tag 2)
               NSInteger angle = [VCFrameEngine shared].rotateAngle;
               [self updateBtn:2 text:[NSString stringWithFormat:@"🔄 旋转: %ld°", (long)angle] active:angle!=0];
-              // 更新镜像 (Tag 3)
               BOOL isMirror = [VCFrameEngine shared].mirrorH;
               [self updateBtn:3 text:isMirror ? @"↔️ 镜像: 开" : @"↔️ 镜像: 关" active:isMirror];
           }
@@ -299,23 +281,22 @@ jobs:
 
           - (void)handleGridTap:(UIButton *)sender {
               NSInteger tag = sender.tag;
-              if (tag == 0) { // 原声
+              if (tag == 0) {
                   BOOL isPlaying = [VCFrameEngine shared].audioPlayer.isPlaying;
                   [[VCFrameEngine shared] toggleAudio:!isPlaying];
-              } else if (tag == 1) { // 循环
-                  // 简单演示，实际按需实现
+              } else if (tag == 1) {
                   [self updateBtn:1 text:@"🔁 循环: 开" active:YES];
                   return;
-              } else if (tag == 2) { // 旋转
+              } else if (tag == 2) {
                   NSInteger angle = [VCFrameEngine shared].rotateAngle + 90;
                   if (angle >= 360) angle = 0;
                   [VCFrameEngine shared].rotateAngle = angle;
-              } else if (tag == 3) { // 镜像
+              } else if (tag == 3) {
                   [VCFrameEngine shared].mirrorH = ![VCFrameEngine shared].mirrorH;
-              } else if (tag == 4) { // 静音麦 (拦截物理麦克风)
+              } else if (tag == 4) {
                   [self updateBtn:4 text:@"🎤 已静音" active:YES];
                   return;
-              } else if (tag == 5) { // 重置
+              } else if (tag == 5) {
                   [VCFrameEngine shared].rotateAngle = 0;
                   [VCFrameEngine shared].mirrorH = NO;
               }
@@ -361,8 +342,17 @@ jobs:
               config.filter = PHPickerFilter.videosFilter;
               PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
               picker.delegate = (id<PHPickerViewControllerDelegate>)self;
-              UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+              
+              // 绕过 keyWindow 报错，用底层指针调用
+              id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+              id window = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
+              if (!window) {
+                  NSArray *wins = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+                  if (wins.count > 0) window = wins.firstObject;
+              }
+              UIViewController *rootVC = ((UIViewController * (*)(id, SEL))objc_msgSend)(window, sel_registerName("rootViewController"));
               while (rootVC.presentedViewController) rootVC = rootVC.presentedViewController;
+              
               [rootVC presentViewController:picker animated:YES completion:nil];
           }
 
@@ -381,7 +371,7 @@ jobs:
                               dispatch_async(dispatch_get_main_queue(), ^{
                                   [[VCFrameEngine shared] loadVideoURL:destURL];
                                   [VCFrameEngine shared].isEnabled = YES;
-                                  [[VCFrameEngine shared] toggleAudio:YES]; // 默认播放声音
+                                  [[VCFrameEngine shared] toggleAudio:YES];
                                   [self refreshUI];
                               });
                           }
@@ -393,9 +383,20 @@ jobs:
 
           static VCamView *floatingView = nil;
 
+          // 用最底层的 Runtime 绕过 keyWindow 报错获取窗口
+          static UIWindow* getKeyWindow() {
+              id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
+              id window = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
+              if (!window) {
+                  NSArray *wins = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+                  if (wins.count > 0) window = wins.firstObject;
+              }
+              return window;
+          }
+
           static void showUI() {
               dispatch_async(dispatch_get_main_queue(), ^{
-                  UIWindow *window = [UIApplication sharedApplication].keyWindow;
+                  UIWindow *window = getKeyWindow();
                   if (!window) return;
                   if (!floatingView) {
                       floatingView = [[VCamView alloc] initWithFrame:CGRectMake(30, 150, 300, 260)];
@@ -405,7 +406,6 @@ jobs:
               });
           }
 
-          // 拦截相机视频流
           @interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
           @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
           @end
@@ -421,29 +421,14 @@ jobs:
           }
           @end
 
-          // 拦截物理麦克风（静音功能）
-          @interface VCAudioInterceptor : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
-          @property (nonatomic, weak) id<AVCaptureAudioDataOutputSampleBufferDelegate> realDelegate;
-          @end
-          @implementation VCAudioInterceptor
-          - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-              // 不做处理，直接丢弃真实音频流
-          }
-          @end
-
-          // 音量键呼出
           %hook SBVolumeControl
           - (void)increaseVolume {
               %orig;
-              if (floatingView) {
-                  dispatch_async(dispatch_get_main_queue(), ^{ floatingView.hidden = !floatingView.hidden; });
-              }
+              if (floatingView) dispatch_async(dispatch_get_main_queue(), ^{ floatingView.hidden = !floatingView.hidden; });
           }
           - (void)decreaseVolume {
               %orig;
-              if (floatingView) {
-                  dispatch_async(dispatch_get_main_queue(), ^{ floatingView.hidden = !floatingView.hidden; });
-              }
+              if (floatingView) dispatch_async(dispatch_get_main_queue(), ^{ floatingView.hidden = !floatingView.hidden; });
           }
           %end
 
@@ -452,7 +437,6 @@ jobs:
                   showUI();
               });
 
-              // 拦截视频
               Class clsV = objc_getClass("AVCaptureVideoDataOutput");
               SEL selV = sel_registerName("setSampleBufferDelegate:queue:");
               Method methodV = class_getInstanceMethod(clsV, selV);
