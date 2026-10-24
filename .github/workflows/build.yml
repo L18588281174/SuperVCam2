@@ -29,9 +29,9 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 18.0.0
+          Version: 19.0.0
           Architecture: iphoneos-arm64
-          Description: Ultimate Virtual Camera
+          Description: Visual Overlay Ultimate Camera
           Maintainer: yourname
           Author: yourname
           Section: Tweaks
@@ -49,7 +49,7 @@ jobs:
           }
           EOF
 
-          # === 核心引擎：强行对齐原相机的格式与附件 ===
+          # === 核心引擎：严格读取本地配置，跨进程生效 ===
           cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -57,10 +57,9 @@ jobs:
           @interface VCFrameEngine : NSObject
           + (instancetype)shared;
           @property (nonatomic, assign) BOOL isEnabled;
-          @property (nonatomic, assign) BOOL mirrorH;
-          @property (nonatomic, assign) NSInteger rotateAngle;
           @property (nonatomic, strong) AVAudioPlayer *audioPlayer;
           - (void)loadVideoURL:(NSURL *)url;
+          - (void)syncState;
           - (void)toggleAudio:(BOOL)play;
           - (CMSampleBufferRef)processSampleBuffer:(CMSampleBufferRef)originalBuffer CF_RETURNS_RETAINED;
           @end
@@ -88,11 +87,13 @@ jobs:
           - (instancetype)init {
               self = [super init];
               if (self) {
-                  _rotateAngle = 0;
-                  // 使用 Metal 加速渲染，极大降低 CPU 占用
                   _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
               }
               return self;
+          }
+          - (void)syncState {
+              NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
+              self.isEnabled = [defaults boolForKey:@"VCamEnabled"];
           }
           - (void)loadVideoURL:(NSURL *)url {
               _videoURL = url;
@@ -101,10 +102,8 @@ jobs:
           - (void)toggleAudio:(BOOL)play {
               if (!_videoURL) return;
               if (!_audioPlayer) {
-                  // 配置 AudioSession，允许后台和混音
-                  [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+                  [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayAndRecord withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionDefaultToSpeaker error:nil];
                   [[AVAudioSession sharedInstance] setActive:YES error:nil];
-                  
                   _audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:_videoURL error:nil];
                   _audioPlayer.numberOfLoops = -1;
                   [_audioPlayer prepareToPlay];
@@ -126,60 +125,55 @@ jobs:
                   [_reader startReading];
               }
           }
-
-          // === 关键：劫持并重写 ===
           - (CMSampleBufferRef)processSampleBuffer:(CMSampleBufferRef)originalBuffer CF_RETURNS_RETAINED {
-              if (!_isEnabled || !_videoURL) return NULL;
+              if (!self.isEnabled || !_videoURL) return NULL;
               if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
               
-              // 1. 获取我们视频的下一帧
               CMSampleBufferRef videoSb = [_readerOutput copyNextSampleBuffer];
               if (!videoSb) {
-                  // 如果视频播完了，循环读取
                   [self rebuildReader];
                   videoSb = [_readerOutput copyNextSampleBuffer];
                   if (!videoSb) return NULL;
               }
               
-              // 2. 获取原相机画面的尺寸和格式描述（极其重要）
+              NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
+              BOOL isMirror = [defaults boolForKey:@"VCamMirror"];
+              NSInteger angle = [defaults integerForKey:@"VCamRotation"];
+
               CMFormatDescriptionRef originalFormat = CMSampleBufferGetFormatDescription(originalBuffer);
               CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(originalBuffer);
               size_t targetWidth = CVPixelBufferGetWidth(originalImage);
               size_t targetHeight = CVPixelBufferGetHeight(originalImage);
               
-              // 3. 将视频帧转换为 CIImage 并处理缩放/镜像
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:CMSampleBufferGetImageBuffer(videoSb)];
               
-              // 按比例缩放到相机的目标尺寸
               CGFloat scaleX = targetWidth / ciImage.extent.size.width;
               CGFloat scaleY = targetHeight / ciImage.extent.size.height;
               ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
               
-              if (_mirrorH) {
+              if (isMirror) {
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(targetWidth, 0)];
               }
+              if (angle == 90) {
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeRotation(-M_PI_2)];
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(0, targetHeight)];
+              }
               
-              // 4. 创建新的 CVPixelBuffer，格式直接用原相机的格式
               CFDictionaryRef emptyAttrs = (__bridge CFDictionaryRef)@{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
               CVPixelBufferRef newBuf = NULL;
               OSType pixelFormat = CVPixelBufferGetPixelFormatType(originalImage);
               CVPixelBufferCreate(kCFAllocatorDefault, targetWidth, targetHeight, pixelFormat, emptyAttrs, &newBuf);
               
-              // 5. 渲染视频画面到新 buffer 里
               if (newBuf) {
-                  // 确保裁剪到目标尺寸，防止越界
                   ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, targetWidth, targetHeight)];
                   [_ciContext render:ciImage toCVPixelBuffer:newBuf];
               }
               
-              // 6. 用原相机的格式封装我们的画面，强行继承原时间戳和附件
               CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(originalBuffer), .decodeTimeStamp = kCMTimeInvalid };
-              
               CMSampleBufferRef finalSb = NULL;
               CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, originalFormat, &timing, &finalSb);
               
-              // 7. 继承原相机的 attachments（否则底层会认为画面无效）
               CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
               if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
                   CFDictionaryRef attachments = CFArrayGetValueAtIndex(attachmentsArray, 0);
@@ -188,13 +182,12 @@ jobs:
               
               if (newBuf) CVPixelBufferRelease(newBuf);
               CFRelease(videoSb);
-              
               return finalSb;
           }
           @end
           EOF
 
-          # === UI 界面 ===
+          # === UI 与 全局视觉覆盖 ===
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
@@ -211,7 +204,6 @@ jobs:
           @property (nonatomic, strong) AVPlayer *previewPlayer;
           @property (nonatomic, strong) AVPlayerLayer *previewLayer;
           @property (nonatomic, strong) NSMutableArray *gridButtons;
-          @property (nonatomic, assign) BOOL hasVideo;
           @end
 
           @interface VCamPassthroughWindow () <PHPickerViewControllerDelegate>
@@ -228,7 +220,7 @@ jobs:
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  self.windowLevel = UIWindowLevelAlert + 1000; 
+                  self.windowLevel = UIWindowLevelAlert + 2000; // 极高优先级，防遮挡
                   self.backgroundColor = [UIColor clearColor];
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
@@ -320,34 +312,29 @@ jobs:
               return YES;
           }
 
-          - (void)expandPanel { 
-              self.panel.hidden = NO; 
-              [self.previewPlayer play];
-          }
-          - (void)minimizePanel { 
-              self.panel.hidden = YES; 
-              [self.previewPlayer pause];
-          }
+          - (void)expandPanel { self.panel.hidden = NO; [self.previewPlayer play]; }
+          - (void)minimizePanel { self.panel.hidden = YES; [self.previewPlayer pause]; }
 
           - (void)refreshUI {
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
-              self.hasVideo = [defaults objectForKey:@"VCamVideoPath"] != nil;
-              if (!self.hasVideo) {
+              BOOL hasVideo = [defaults objectForKey:@"VCamVideoPath"] != nil;
+              if (!hasVideo) {
                   [self.mainSwitchBtn setTitle:@"⚠️ 请先选择视频" forState:UIControlStateNormal];
                   self.mainSwitchBtn.backgroundColor = [UIColor grayColor];
                   self.mainSwitchBtn.enabled = NO;
               } else {
                   self.mainSwitchBtn.enabled = YES;
-                  BOOL isOn = [VCFrameEngine shared].isEnabled;
+                  BOOL isOn = [defaults boolForKey:@"VCamEnabled"];
                   [self.mainSwitchBtn setTitle:isOn ? @"🟢 替换已开启 (点击关闭)" : @"🔴 替换已关闭 (点击开启)" forState:UIControlStateNormal];
                   self.mainSwitchBtn.backgroundColor = isOn ? [UIColor colorWithRed:0 green:200/255.0 blue:100/255.0 alpha:1] : [UIColor colorWithRed:200/255.0 green:50/255.0 blue:50/255.0 alpha:1];
               }
-              BOOL isAudio = [VCFrameEngine shared].audioPlayer.isPlaying;
+              
+              BOOL isAudio = [defaults boolForKey:@"VCamAudio"];
               [self updateBtn:0 text:isAudio ? @"🔊 原声: 开" : @"🔇 原声: 关" active:isAudio];
               [self updateBtn:1 text:@"🔁 循环: 开" active:YES];
-              NSInteger angle = [VCFrameEngine shared].rotateAngle;
+              NSInteger angle = [defaults integerForKey:@"VCamRotation"];
               [self updateBtn:2 text:[NSString stringWithFormat:@"🔄 旋转: %ld°", (long)angle] active:angle!=0];
-              BOOL isMirror = [VCFrameEngine shared].mirrorH;
+              BOOL isMirror = [defaults boolForKey:@"VCamMirror"];
               [self updateBtn:3 text:isMirror ? @"↔️ 镜像: 开" : @"↔️ 镜像: 关" active:isMirror];
           }
 
@@ -358,38 +345,34 @@ jobs:
           }
 
           - (void)toggleMainSwitch {
-              [VCFrameEngine shared].isEnabled = ![VCFrameEngine shared].isEnabled;
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
-              [defaults setBool:[VCFrameEngine shared].isEnabled forKey:@"VCamEnabled"];
+              BOOL isOn = [defaults boolForKey:@"VCamEnabled"];
+              [defaults setBool:!isOn forKey:@"VCamEnabled"];
               [defaults synchronize];
-              
-              if ([VCFrameEngine shared].isEnabled) {
-                  NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
-                  if (savedPath) {
-                      [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-                      [[VCFrameEngine shared] toggleAudio:YES];
-                  }
-              } else {
-                  [[VCFrameEngine shared] toggleAudio:NO];
-              }
-              
               CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.supervcam.toggle"), NULL, NULL, YES);
               [self refreshUI];
           }
 
           - (void)handleGridTap:(UIButton *)sender {
+              NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
               NSInteger tag = sender.tag;
-              if (tag == 0) {
-                  [[VCFrameEngine shared] toggleAudio:![VCFrameEngine shared].audioPlayer.isPlaying];
+              if (tag == 0) { // 原声
+                  BOOL isAudio = [defaults boolForKey:@"VCamAudio"];
+                  [defaults setBool:!isAudio forKey:@"VCamAudio"];
+              } else if (tag == 2) { // 旋转
+                  NSInteger angle = [defaults integerForKey:@"VCamRotation"];
+                  angle = (angle + 90) % 360;
+                  [defaults setInteger:angle forKey:@"VCamRotation"];
+              } else if (tag == 3) { // 镜像
+                  BOOL isMirror = [defaults boolForKey:@"VCamMirror"];
+                  [defaults setBool:!isMirror forKey:@"VCamMirror"];
+              } else if (tag == 5) { // 重置
+                  [defaults setInteger:0 forKey:@"VCamRotation"];
+                  [defaults setBool:NO forKey:@"VCamMirror"];
               }
-              else if (tag == 2) {
-                  [VCFrameEngine shared].rotateAngle = ([VCFrameEngine shared].rotateAngle + 90) % 360;
-              } else if (tag == 3) {
-                  [VCFrameEngine shared].mirrorH = ![VCFrameEngine shared].mirrorH;
-              } else if (tag == 5) {
-                  [VCFrameEngine shared].rotateAngle = 0;
-                  [VCFrameEngine shared].mirrorH = NO;
-              }
+              [defaults synchronize];
+              // 每次点击都发通知刷新相机
+              CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.supervcam.toggle"), NULL, NULL, YES);
               [self refreshUI];
           }
 
@@ -418,25 +401,23 @@ jobs:
                           if (url) {
                               NSString *destPath = @"/tmp/vcam_video.mp4";
                               NSURL *destURL = [NSURL fileURLWithPath:destPath];
-                              
                               [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
                               [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:nil];
                               
                               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
                               [defaults setObject:destPath forKey:@"VCamVideoPath"];
                               [defaults setBool:NO forKey:@"VCamEnabled"];
+                              [defaults setBool:NO forKey:@"VCamAudio"];
+                              [defaults setInteger:0 forKey:@"VCamRotation"];
+                              [defaults setBool:NO forKey:@"VCamMirror"];
                               [defaults synchronize];
                               
                               dispatch_async(dispatch_get_main_queue(), ^{
-                                  [[VCFrameEngine shared] loadVideoURL:destURL];
-                                  [VCFrameEngine shared].isEnabled = NO;
-                                  
                                   self.previewPlayer = [AVPlayer playerWithURL:destURL];
-                                  self.previewPlayer.muted = NO;
                                   self.previewLayer.player = self.previewPlayer;
                                   [self.previewPlayer play];
-                                  
                                   [self refreshUI];
+                                  CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("com.yourname.supervcam.toggle"), NULL, NULL, YES);
                               });
                           }
                       }];
@@ -447,6 +428,11 @@ jobs:
 
           static VCamPassthroughWindow *floatWindow = nil;
 
+          // === 全局视觉覆盖层 ===
+          static UIWindow *visualOverlayWindow = nil;
+          static AVPlayer *globalPlayer = nil;
+          static AVPlayerLayer *globalPlayerLayer = nil;
+
           static void setupGlobalUI() {
               dispatch_async(dispatch_get_main_queue(), ^{
                   if (!floatWindow) {
@@ -454,6 +440,49 @@ jobs:
                       floatWindow.ballBtn.center = CGPointMake(50, 150);
                       floatWindow.panel.center = CGPointMake([UIScreen mainScreen].bounds.size.width / 2, [UIScreen mainScreen].bounds.size.height / 2);
                       floatWindow.hidden = NO;
+                  }
+              });
+          }
+
+          static void updateOverlay() {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
+                  BOOL isEnabled = [defaults boolForKey:@"VCamEnabled"];
+                  NSString *path = [defaults objectForKey:@"VCamVideoPath"];
+                  
+                  if (isEnabled && path) {
+                      if (!visualOverlayWindow) {
+                          visualOverlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+                          visualOverlayWindow.windowLevel = UIWindowLevelAlert + 1500;
+                          UIViewController *vc = [[UIViewController alloc] init];
+                          vc.view.backgroundColor = [UIColor clearColor];
+                          visualOverlayWindow.rootViewController = vc;
+                          
+                          globalPlayer = [AVPlayer playerWithURL:[NSURL fileURLWithPath:path]];
+                          globalPlayer.muted = YES; // 由底层引擎发声
+                          globalPlayerLayer = [AVPlayerLayer playerLayerWithPlayer:globalPlayer];
+                          globalPlayerLayer.frame = [UIScreen mainScreen].bounds;
+                          globalPlayerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+                          [vc.view.layer addSublayer:globalPlayerLayer];
+                      }
+                      
+                      // 更新方向
+                      NSInteger angle = [defaults integerForKey:@"VCamRotation"];
+                      BOOL isMirror = [defaults boolForKey:@"VCamMirror"];
+                      CGAffineTransform t = CGAffineTransformIdentity;
+                      if (isMirror) t = CGAffineTransformScale(t, -1, 1);
+                      if (angle == 90) t = CGAffineTransformRotate(t, M_PI_2);
+                      else if (angle == 180) t = CGAffineTransformRotate(t, M_PI);
+                      else if (angle == 270) t = CGAffineTransformRotate(t, -M_PI_2);
+                      globalPlayerLayer.affineTransform = t;
+                      
+                      visualOverlayWindow.hidden = NO;
+                      [globalPlayer play];
+                  } else {
+                      if (visualOverlayWindow) {
+                          visualOverlayWindow.hidden = YES;
+                          [globalPlayer pause];
+                      }
                   }
               });
           }
@@ -482,7 +511,6 @@ jobs:
           @end
           @implementation VCFrameInterceptor
           - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-              // 调用终极替换引擎
               CMSampleBufferRef vBuf = [[VCFrameEngine shared] processSampleBuffer:sampleBuffer];
               if (vBuf) {
                   [self.realDelegate captureOutput:output didOutputSampleBuffer:vBuf fromConnection:connection];
@@ -495,13 +523,20 @@ jobs:
 
           static void handleCrossProcessNotify(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
               NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
-              [VCFrameEngine shared].isEnabled = [defaults boolForKey:@"VCamEnabled"];
+              [[VCFrameEngine shared] syncState];
               NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
-              if (savedPath && [VCFrameEngine shared].isEnabled) {
+              BOOL isEnabled = [defaults boolForKey:@"VCamEnabled"];
+              BOOL isAudio = [defaults boolForKey:@"VCamAudio"];
+              
+              if (savedPath && isEnabled) {
                   [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-                  [[VCFrameEngine shared] toggleAudio:YES];
+                  [[VCFrameEngine shared] toggleAudio:isAudio];
               } else {
                   [[VCFrameEngine shared] toggleAudio:NO];
+              }
+              
+              if (![[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+                  updateOverlay(); // 通知视觉覆盖层更新
               }
           }
 
@@ -512,7 +547,7 @@ jobs:
                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ setupGlobalUI(); });
               } else {
                   NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.yourname.supervcam"];
-                  [VCFrameEngine shared].isEnabled = [defaults boolForKey:@"VCamEnabled"];
+                  [[VCFrameEngine shared] syncState];
                   NSString *savedPath = [defaults objectForKey:@"VCamVideoPath"];
                   if (savedPath) [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
 
@@ -528,6 +563,9 @@ jobs:
                       });
                       method_setImplementation(methodV, newIMPV);
                   }
+                  
+                  // 相机启动时立刻触发一次覆盖检查
+                  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ updateOverlay(); });
               }
           }
           EOF
