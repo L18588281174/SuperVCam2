@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 3.0.0
+          Version: 4.0.0
           Architecture: iphoneos-arm64
           Description: Ultimate Virtual Camera for Dopamine
           Maintainer: yourname
@@ -38,11 +38,13 @@ jobs:
           Depends: mobilesubstrate
           EOF
 
+          # 注意这里：同时注入系统相机和桌面（用于音量键呼出）
           cat > SuperVCam.plist << 'EOF'
           {
               Filter = {
                   Bundles = (
-                      "com.apple.camera"
+                      "com.apple.camera",
+                      "com.apple.springboard"
                   );
               };
           }
@@ -151,38 +153,36 @@ jobs:
           #import <UIKit/UIKit.h>
           #import <PhotosUI/PhotosUI.h>
           #import <objc/runtime.h>
-          #import <objc/message.h>
           #import "VCFrameEngine.h"
 
-          @interface VCamWindow : UIWindow
+          // 这里直接用 UIView 做界面，不再用 UIWindow
+          @interface VCamView : UIView
           @end
 
-          @interface VCamWindow () <PHPickerViewControllerDelegate>
-          @property (nonatomic, strong) UIButton *toggleBtn;
+          @interface VCamView () <PHPickerViewControllerDelegate>
           @end
 
-          @implementation VCamWindow
+          @implementation VCamView
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  self.windowLevel = UIWindowLevelAlert + 10;
-                  self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
-                  self.layer.cornerRadius = 15;
+                  self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.9];
+                  self.layer.cornerRadius = 10;
                   self.clipsToBounds = YES;
                   
-                  self.toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  self.toggleBtn.frame = CGRectMake(10, 10, 120, 40);
-                  [self.toggleBtn setTitle:@"开关" forState:UIControlStateNormal];
-                  [self.toggleBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
-                  [self.toggleBtn addTarget:self action:@selector(toggleVCam) forControlEvents:UIControlEventTouchUpInside];
-                  [self addSubview:self.toggleBtn];
-                  
                   UIButton *pickBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  pickBtn.frame = CGRectMake(10, 60, 120, 40);
-                  [pickBtn setTitle:@"选视频" forState:UIControlStateNormal];
+                  pickBtn.frame = CGRectMake(10, 10, 120, 40);
+                  [pickBtn setTitle:@"相册选视频" forState:UIControlStateNormal];
                   [pickBtn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
                   [pickBtn addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
                   [self addSubview:pickBtn];
+                  
+                  UIButton *toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                  toggleBtn.frame = CGRectMake(10, 60, 120, 40);
+                  [toggleBtn setTitle:@"开启/关闭" forState:UIControlStateNormal];
+                  [toggleBtn setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
+                  [toggleBtn addTarget:self action:@selector(toggleVCam) forControlEvents:UIControlEventTouchUpInside];
+                  [self addSubview:toggleBtn];
               }
               return self;
           }
@@ -191,25 +191,15 @@ jobs:
               [VCFrameEngine shared].isEnabled = ![VCFrameEngine shared].isEnabled;
           }
 
-          - (UIViewController *)getTopVC {
-              id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("UIApplication"), sel_registerName("sharedApplication"));
-              id window = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("keyWindow"));
-              if (!window) {
-                  NSArray *wins = ((NSArray * (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
-                  if (wins.count > 0) window = wins.firstObject;
-              }
-              UIViewController *vc = ((UIViewController * (*)(id, SEL))objc_msgSend)(window, sel_registerName("rootViewController"));
-              while (vc.presentedViewController) vc = vc.presentedViewController;
-              return vc;
-          }
-
           - (void)pickVideo {
               self.hidden = YES;
               PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
               config.filter = PHPickerFilter.videosFilter;
               PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
               picker.delegate = (id<PHPickerViewControllerDelegate>)self;
-              [[self getTopVC] presentViewController:picker animated:YES completion:nil];
+              
+              UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+              [rootVC presentViewController:picker animated:YES completion:nil];
           }
 
           - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
@@ -237,7 +227,37 @@ jobs:
           }
           @end
 
-          static VCamWindow *menuWindow = nil;
+          static VCamView *uiView = nil;
+
+          // 暴力获取顶层 Window
+          static UIWindow* getKeyWindow() {
+              UIWindow *keyWindow = nil;
+              if (@available(iOS 13.0, *)) {
+                  for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                      if (scene.activationState == UISceneActivationStateForegroundActive) {
+                          for (UIWindow *w in scene.windows) {
+                              if (w.isKeyWindow) { keyWindow = w; break; }
+                          }
+                      }
+                  }
+              }
+              if (!keyWindow) keyWindow = [UIApplication sharedApplication].keyWindow;
+              return keyWindow;
+          }
+
+          // 强行把 UI 贴到屏幕上
+          static void showUI() {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  UIWindow *window = getKeyWindow();
+                  if (window) {
+                      if (!uiView) {
+                          uiView = [[VCamView alloc] initWithFrame:CGRectMake(20, 100, 140, 110)];
+                      }
+                      [window addSubview:uiView];
+                      [window bringSubviewToFront:uiView];
+                  }
+              });
+          }
 
           @interface VCFrameInterceptor : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
           @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
@@ -254,44 +274,47 @@ jobs:
           }
           @end
 
+          // Hook 相机输出
           __attribute__((constructor)) static void initVCam() {
               Class cls = objc_getClass("AVCaptureVideoDataOutput");
               SEL sel = sel_registerName("setSampleBufferDelegate:queue:");
               Method method = class_getInstanceMethod(cls, sel);
-              if (!method) return;
-              IMP originalIMP = method_getImplementation(method);
-              IMP newIMP = imp_implementationWithBlock(^void(id _self, id delegate, dispatch_queue_t queue) {
-                  if (!delegate) {
-                      ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, delegate, queue);
-                      return;
-                  }
-                  NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
-                  if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
-                      [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
-                      [VCFrameEngine shared].isEnabled = YES;
-                  }
-                  VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
-                  interceptor.realDelegate = delegate;
-                  ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, interceptor, queue);
-                  dispatch_async(dispatch_get_main_queue(), ^{
-                      if (!menuWindow) {
-                          menuWindow = [[VCamWindow alloc] initWithFrame:CGRectMake(20, 100, 140, 110)];
+              if (method) {
+                  IMP originalIMP = method_getImplementation(method);
+                  IMP newIMP = imp_implementationWithBlock(^void(id _self, id delegate, dispatch_queue_t queue) {
+                      if (!delegate) {
+                          ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, delegate, queue);
+                          return;
                       }
-                      menuWindow.hidden = NO;
+                      NSString *savedPath = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
+                      if (savedPath && [[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
+                          [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:savedPath]];
+                          [VCFrameEngine shared].isEnabled = YES;
+                      }
+                      VCFrameInterceptor *interceptor = [VCFrameInterceptor new];
+                      interceptor.realDelegate = delegate;
+                      ((void (*)(id, SEL, id, dispatch_queue_t))originalIMP)(_self, sel, interceptor, queue);
+                      showUI();
                   });
-              });
-              method_setImplementation(method, newIMP);
-          }
+                  method_setImplementation(method, newIMP);
+              }
 
-          __attribute__((constructor)) static void initVolume() {
+              // 延迟 2 秒强行弹出界面（应对刚打开相机时的场景加载）
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                  showUI();
+              });
+
+              // 音量键监听
               [[NSNotificationCenter defaultCenter] addObserverForName:@"AVSystemController_SystemVolumeDidChangeNotification"
                                                                 object:nil
                                                                  queue:[NSOperationQueue mainQueue]
                                                             usingBlock:^(NSNotification *note) {
                   NSString *reason = note.userInfo[@"AVSystemController_AudioVolumeChangeReasonNotificationParameter"];
                   if ([reason isEqualToString:@"ExplicitVolumeChange"]) {
-                      if (menuWindow) {
-                          menuWindow.hidden = !menuWindow.hidden;
+                      if (uiView) {
+                          uiView.hidden = !uiView.hidden;
+                      } else {
+                          showUI();
                       }
                   }
               }];
