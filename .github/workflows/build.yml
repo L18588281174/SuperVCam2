@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 7.0.0
+          Version: 8.0.0
           Architecture: iphoneos-arm64
           Description: True Data Stream Hijacker
           Maintainer: yourname
@@ -112,7 +112,6 @@ jobs:
               if (!self.isEnabled || !_videoURL) return NULL;
               if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
               
-              // 1. 取出假帧
               CMSampleBufferRef videoSb = [_readerOutput copyNextSampleBuffer];
               if (!videoSb) {
                   [self rebuildReader];
@@ -123,7 +122,6 @@ jobs:
               CVImageBufferRef videoImage = CMSampleBufferGetImageBuffer(videoSb);
               if (!videoImage) { CFRelease(videoSb); return NULL; }
               
-              // 2. 提取原相机的一切参数
               CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(originalBuffer);
               CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(originalBuffer);
               size_t targetW = CVPixelBufferGetWidth(originalImage);
@@ -134,7 +132,6 @@ jobs:
               BOOL isMirror = [def boolForKey:@"VCamMirror"];
               NSInteger angle = [def integerForKey:@"VCamRotation"];
               
-              // 3. 将我们的视频帧，强行缩放、裁切到与原相机一模一样的尺寸
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:videoImage];
               CGFloat scaleX = targetW / ciImage.extent.size.width;
               CGFloat scaleY = targetH / ciImage.extent.size.height;
@@ -151,7 +148,6 @@ jobs:
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(0, targetH)];
               }
 
-              // 4. 渲染进与原相机格式完全一致的 Buffer 里
               CVPixelBufferRef newBuf = NULL;
               NSDictionary *attrs = @{
                   (id)kCVPixelBufferPixelFormatTypeKey: @(format),
@@ -164,16 +160,13 @@ jobs:
                   [_ciContext render:ciImage toCVPixelBuffer:newBuf];
               }
 
-              // 5. 核心重头戏：偷天换日
               CMTime pts = CMSampleBufferGetPresentationTimeStamp(originalBuffer);
               CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = pts, .decodeTimeStamp = kCMTimeInvalid };
               
               CMSampleBufferRef finalSb = NULL;
-              // 使用原相机的 fmtDesc 封包！骗过底层！
               CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, fmtDesc, &timing, &finalSb);
               
               if (finalSb) {
-                  // 必须强行继承原帧的附件（包含元数据、方向等）
                   CFArrayRef attArr = CMSampleBufferGetSampleAttachmentsArray(originalBuffer, false);
                   if (attArr && CFArrayGetCount(attArr) > 0) {
                       CFDictionaryRef att = CFArrayGetValueAtIndex(attArr, 0);
@@ -181,7 +174,6 @@ jobs:
                   }
               }
 
-              // 严格释放，否则死机
               if (newBuf) CVPixelBufferRelease(newBuf);
               CFRelease(videoSb);
               return finalSb;
@@ -204,7 +196,6 @@ jobs:
 
           @implementation VCAMProxy
           - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-              // 拦截原相机的帧，获取被我们替换后的帧
               CMSampleBufferRef fakeSb = [[VCFrameEngine shared] hijackSampleBuffer:sampleBuffer];
               if (fakeSb) {
                   [self.originalDelegate captureOutput:output didOutputSampleBuffer:fakeSb fromConnection:connection];
@@ -216,11 +207,12 @@ jobs:
           @end
           EOF
 
-          # ================= 模块 3：UI (删掉所有遮挡与多余手势) =================
+          # ================= 模块 3：UI 与 Hook (严格格式化防报错) =================
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <UIKit/UIKit.h>
           #import <PhotosUI/PhotosUI.h>
+          #import <objc/runtime.h>
           #import "VCAMProxy.h"
           #import "VCFrameEngine.h"
 
@@ -236,7 +228,6 @@ jobs:
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  // 确保这个窗口不会拦截手机原本的全面屏手势
                   self.windowLevel = UIWindowLevelNormal + 10;
                   self.backgroundColor = [UIColor clearColor];
                   self.rootViewController = [[UIViewController alloc] init];
@@ -360,7 +351,10 @@ jobs:
           static NSTimeInterval lastVolUp = 0;
 
           %hook SBVolumeControl
-          - (void)increaseVolume { %orig; lastVolUp = [[NSDate date] timeIntervalSince1970]; }
+          - (void)increaseVolume {
+              %orig;
+              lastVolUp = [[NSDate date] timeIntervalSince1970];
+          }
           - (void)decreaseVolume {
               %orig;
               NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
