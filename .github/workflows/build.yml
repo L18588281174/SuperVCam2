@@ -20,8 +20,8 @@ jobs:
           THEOS_PACKAGE_SCHEME = rootless
           include $(THEOS)/makefiles/common.mk
           TWEAK_NAME = SuperVCam
-          SuperVCam_FILES = Tweak.x VCAMProxy.m VCAMDataProvider.m
-          SuperVCam_FRAMEWORKS = AVFoundation CoreMedia CoreVideo UIKit Foundation PhotosUI Photos AudioToolbox AVKit
+          SuperVCam_FILES = Tweak.x VCFrameEngine.m VCAMProxy.m
+          SuperVCam_FRAMEWORKS = AVFoundation CoreMedia CoreVideo CoreImage UIKit Foundation PhotosUI Photos AudioToolbox AVKit
           SuperVCam_CFLAGS = -fobjc-arc
           include $(THEOS_MAKE_PATH)/tweak.mk
           EOF
@@ -29,9 +29,9 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 1.0.0
+          Version: 2.0.0
           Architecture: iphoneos-arm64
-          Description: Commercial Grade Virtual Camera
+          Description: Ultimate Video Virtual Camera
           Maintainer: yourname
           Author: yourname
           Section: Tweaks
@@ -49,79 +49,72 @@ jobs:
           }
           EOF
 
-          # ================= 模块 1：DataProvider（安全缓冲池） =================
-          cat > VCAMDataProvider.h << 'EOF'
+          # ================= 模块 1：视频引擎 (负责解码和防卡死) =================
+          cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
-          #import <CoreVideo/CoreVideo.h>
-          @interface VCAMDataProvider : NSObject
+          #import <AVFoundation/AVFoundation.h>
+          @interface VCFrameEngine : NSObject
           + (instancetype)shared;
-          - (void)updatePixelBuffer:(CVPixelBufferRef)newBuffer;
-          - (CVPixelBufferRef)getLatestPixelBuffer;
-          - (void)loadTestImage;
+          @property (nonatomic, assign) BOOL isEnabled;
+          - (void)loadVideoURL:(NSURL *)url;
+          - (CMSampleBufferRef)getNextVideoFrame CF_RETURNS_RETAINED;
           @end
           EOF
 
-          cat > VCAMDataProvider.m << 'EOF'
-          #import "VCAMDataProvider.h"
-          #import <UIKit/UIKit.h>
+          cat > VCFrameEngine.m << 'EOF'
+          #import "VCFrameEngine.h"
 
-          @interface VCAMDataProvider () {
-              CVPixelBufferRef _currentBuffer;
-              NSLock *_bufferLock;
+          @interface VCFrameEngine () {
+              AVAssetReader *_reader;
+              AVAssetReaderTrackOutput *_readerOutput;
+              NSURL *_videoURL;
           }
           @end
 
-          @implementation VCAMDataProvider
+          @implementation VCFrameEngine
           + (instancetype)shared {
-              static VCAMDataProvider *inst;
+              static VCFrameEngine *inst;
               static dispatch_once_t once;
-              dispatch_once(&once, ^{ inst = [VCAMDataProvider new]; });
+              dispatch_once(&once, ^{ inst = [VCFrameEngine new]; });
               return inst;
           }
-          - (instancetype)init {
-              self = [super init];
-              if (self) {
-                  _bufferLock = [[NSLock alloc] init];
+          - (void)loadVideoURL:(NSURL *)url {
+              _videoURL = url;
+              [self rebuildReader];
+          }
+          - (void)rebuildReader {
+              if (_reader) { [_reader cancelReading]; _reader = nil; }
+              if (!_videoURL) return;
+              
+              AVAsset *asset = [AVAsset assetWithURL:_videoURL];
+              _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
+              AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+              if (track) {
+                  // 解码出 BGRA 格式以便于处理
+                  _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
+                      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
+                  }];
+                  _readerOutput.alwaysCopiesSampleData = NO;
+                  [_reader addOutput:_readerOutput];
+                  [_reader startReading];
               }
-              return self;
           }
-          - (void)updatePixelBuffer:(CVPixelBufferRef)newBuffer {
-              [_bufferLock lock];
-              if (_currentBuffer) CVPixelBufferRelease(_currentBuffer);
-              if (newBuffer) _currentBuffer = CVPixelBufferRetain(newBuffer);
-              [_bufferLock unlock];
-          }
-          - (CVPixelBufferRef)getLatestPixelBuffer {
-              [_bufferLock lock];
-              CVPixelBufferRef out = _currentBuffer ? CVPixelBufferRetain(_currentBuffer) : NULL;
-              [_bufferLock unlock];
-              return out;
-          }
-
-          // 测试用：生成一张红色的假图作为 PixelBuffer
-          - (void)loadTestImage {
-              NSDictionary *attrs = @{
-                  (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-                  (id)kCVPixelBufferWidthKey: @(1080),
-                  (id)kCVPixelBufferHeightKey: @(1920)
-              };
-              CVPixelBufferRef pb = NULL;
-              CVPixelBufferCreate(kCFAllocatorDefault, 1080, 1920, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)attrs, &pb);
+          - (CMSampleBufferRef)getNextVideoFrame CF_RETURNS_RETAINED {
+              if (!_isEnabled || !_videoURL) return NULL;
+              if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
               
-              // 填充红色
-              CVPixelBufferLockBaseAddress(pb, 0);
-              void *baseAddress = CVPixelBufferGetBaseAddress(pb);
-              size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pb);
-              memset(baseAddress, 255, bytesPerRow * 1920); // 简单粗暴全红
-              CVPixelBufferUnlockBaseAddress(pb, 0);
-              
-              [self updatePixelBuffer:pb];
-              CVPixelBufferRelease(pb);
+              CMSampleBufferRef sb = [_readerOutput copyNextSampleBuffer];
+              if (!sb) {
+                  [self rebuildReader];
+                  sb = [_readerOutput copyNextSampleBuffer];
+                  if (!sb) return NULL;
+              }
+              return sb;
           }
           @end
           EOF
 
-          # ================= 模块 2：Proxy（双面间谍） =================
+          # ================= 模块 2：双面间谍 Proxy (核心替换) =================
           cat > VCAMProxy.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -132,106 +125,270 @@ jobs:
 
           cat > VCAMProxy.m << 'EOF'
           #import "VCAMProxy.h"
-          #import "VCAMDataProvider.h"
+          #import "VCFrameEngine.h"
+          #import <CoreImage/CoreImage.h>
 
           @implementation VCAMProxy
           - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-              CVPixelBufferRef fakePB = [[VCAMDataProvider shared] getLatestPixelBuffer];
               
-              // 如果没准备假帧，或者没开启替换，直接原样透传
-              if (!fakePB) {
+              BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
+              if (!isEnabled) {
                   [self.originalDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
                   return;
               }
 
-              CMVideoFormatDescriptionRef fmtDesc;
-              CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, fakePB, &fmtDesc);
-              
-              // 严格对齐时间戳！绝不能乱写
-              CMTime pts = CMClockGetTime(CMClockGetHostTimeClock());
-              CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = pts, .decodeTimeStamp = kCMTimeInvalid };
-              
-              CMSampleBufferRef fakeSB;
-              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, fakePB, fmtDesc, &timing, &fakeSB);
-              
-              // 继承原帧的附件（极其关键）
-              CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-              if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
-                  CFDictionaryRef attachments = CFArrayGetValueAtIndex(attachmentsArray, 0);
-                  CMSetAttachments(fakeSB, attachments, kCMAttachmentMode_ShouldPropagate);
+              CMSampleBufferRef videoSb = [[VCFrameEngine shared] getNextVideoFrame];
+              if (!videoSb) {
+                  [self.originalDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+                  return;
               }
 
-              // 喂给真正的 App
-              [self.originalDelegate captureOutput:output didOutputSampleBuffer:fakeSB fromConnection:connection];
+              // === 核心：偷天换日 ===
+              CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(sampleBuffer);
+              CVImageBufferRef videoImage = CMSampleBufferGetImageBuffer(videoSb);
               
-              // 必须释放，否则爆内存
-              CFRelease(fakeSB);
-              CFRelease(fmtDesc);
-              CVPixelBufferRelease(fakePB);
+              if (!originalImage || !videoImage) {
+                  CFRelease(videoSb);
+                  [self.originalDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+                  return;
+              }
+
+              size_t targetW = CVPixelBufferGetWidth(originalImage);
+              size_t targetH = CVPixelBufferGetHeight(originalImage);
+              OSType format = CVPixelBufferGetPixelFormatType(originalImage);
+              CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+
+              // 将视频帧缩放并对齐到目标相机的尺寸
+              CIImage *ciImage = [CIImage imageWithCVPixelBuffer:videoImage];
+              CGFloat scaleX = targetW / ciImage.extent.size.width;
+              CGFloat scaleY = targetH / ciImage.extent.size.height;
+              ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+              ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, targetW, targetH)];
+
+              // 开启镜像（若设置）
+              if ([[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"]) {
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
+                  ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(targetW, 0)];
+              }
+
+              // 渲染到新 Buffer 中，格式强行对齐原相机
+              NSDictionary *attrs = @{
+                  (id)kCVPixelBufferPixelFormatTypeKey: @(format),
+                  (id)kCVPixelBufferWidthKey: @(targetW),
+                  (id)kCVPixelBufferHeightKey: @(targetH),
+                  (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
+              };
+              CVPixelBufferRef newBuf = NULL;
+              CVPixelBufferCreate(kCFAllocatorDefault, targetW, targetH, format, (__bridge CFDictionaryRef)attrs, &newBuf);
+              
+              if (newBuf) {
+                  static CIContext *ctx = nil;
+                  if (!ctx) ctx = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+                  [ctx render:ciImage toCVPixelBuffer:newBuf];
+              }
+
+              // 重写时间戳并封装
+              CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+              CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = pts, .decodeTimeStamp = kCMTimeInvalid };
+              CMSampleBufferRef finalSb = NULL;
+              CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, fmtDesc, &timing, &finalSb);
+
+              // 继承原相机的附件（防止平台检测）
+              if (finalSb) {
+                  CFArrayRef attArr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+                  if (attArr && CFArrayGetCount(attArr) > 0) {
+                      CFDictionaryRef att = CFArrayGetValueAtIndex(attArr, 0);
+                      CMSetAttachments(finalSb, att, kCMAttachmentMode_ShouldPropagate);
+                  }
+                  [self.originalDelegate captureOutput:output didOutputSampleBuffer:finalSb fromConnection:connection];
+                  CFRelease(finalSb);
+              } else {
+                  [self.originalDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+              }
+
+              // 内存清理，防止 OOM
+              if (newBuf) CVPixelBufferRelease(newBuf);
+              CFRelease(videoSb);
           }
           @end
           EOF
 
-          # ================= 模块 3：Tweak.x（UI 与 Hook） =================
+          # ================= 模块 3：UI 与 音量键 Hook =================
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
+          #import <AVKit/AVKit.h>
           #import <UIKit/UIKit.h>
+          #import <PhotosUI/PhotosUI.h>
           #import <objc/runtime.h>
           #import "VCAMProxy.h"
-          #import "VCAMDataProvider.h"
+          #import "VCFrameEngine.h"
 
-          // 极简 UI
-          @interface VCamWindow : UIWindow
+          @interface VCamWindow : UIWindow <PHPickerViewControllerDelegate>
+          @property (nonatomic, strong) UIView *panel;
+          @property (nonatomic, strong) UIButton *ballBtn;
+          @property (nonatomic, strong) UIButton *toggleBtn;
+          @property (nonatomic, strong) UIButton *mirrorBtn;
+          @property (nonatomic, strong) UIView *previewBox;
+          @property (nonatomic, strong) AVPlayer *player;
+          @property (nonatomic, strong) AVPlayerLayer *playerLayer;
           @end
+
           @implementation VCamWindow
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  self.windowLevel = UIWindowLevelAlert + 1000;
+                  self.windowLevel = UIWindowLevelAlert + 2000;
                   self.backgroundColor = [UIColor clearColor];
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
                   
-                  UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-                  btn.frame = CGRectMake(50, 150, 150, 50);
-                  btn.backgroundColor = [UIColor redColor];
-                  [btn setTitle:@"开启替换(红屏)" forState:UIControlStateNormal];
-                  [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                  [btn addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-                  [self.rootViewController.view addSubview:btn];
+                  UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(minimize)];
+                  tap.cancelsTouchesInView = NO;
+                  [self.rootViewController.view addGestureRecognizer:tap];
+
+                  // 悬浮球
+                  self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+                  self.ballBtn.frame = CGRectMake(0, 0, 50, 50);
+                  self.ballBtn.backgroundColor = [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:0.8];
+                  self.ballBtn.layer.cornerRadius = 25;
+                  [self.ballBtn setTitle:@"V" forState:UIControlStateNormal];
+                  self.ballBtn.titleLabel.font = [UIFont boldSystemFontOfSize:24];
+                  [self.ballBtn addTarget:self action:@selector(expand) forControlEvents:UIControlEventTouchUpInside];
+                  [self.rootViewController.view addSubview:self.ballBtn];
+                  
+                  // 主面板
+                  self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 260, 300)];
+                  self.panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.9];
+                  self.panel.layer.cornerRadius = 15;
+                  self.panel.clipsToBounds = YES;
+                  self.panel.hidden = YES;
+                  self.panel.center = self.rootViewController.view.center;
+                  [self.rootViewController.view addSubview:self.panel];
+
+                  UIButton *pick = [UIButton buttonWithType:UIButtonTypeSystem];
+                  pick.frame = CGRectMake(15, 15, 230, 40);
+                  pick.backgroundColor = [UIColor systemBlueColor];
+                  pick.layer.cornerRadius = 8;
+                  [pick setTitle:@"选择视频" forState:UIControlStateNormal];
+                  [pick setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                  [pick addTarget:self action:@selector(pickVideo) forControlEvents:UIControlEventTouchUpInside];
+                  [self.panel addSubview:pick];
+
+                  self.previewBox = [[UIView alloc] initWithFrame:CGRectMake(15, 65, 230, 120)];
+                  self.previewBox.backgroundColor = [UIColor blackColor];
+                  [self.panel addSubview:self.previewBox];
+                  self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:nil];
+                  self.playerLayer.frame = self.previewBox.bounds;
+                  self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+                  [self.previewBox.layer addSublayer:self.playerLayer];
+
+                  self.toggleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                  self.toggleBtn.frame = CGRectMake(15, 195, 110, 40);
+                  self.toggleBtn.layer.cornerRadius = 8;
+                  [self.toggleBtn addTarget:self action:@selector(toggleVCam) forControlEvents:UIControlEventTouchUpInside];
+                  [self.panel addSubview:self.toggleBtn];
+
+                  self.mirrorBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+                  self.mirrorBtn.frame = CGRectMake(135, 195, 110, 40);
+                  self.mirrorBtn.layer.cornerRadius = 8;
+                  [self.mirrorBtn setTitle:@"镜像开关" forState:UIControlStateNormal];
+                  [self.mirrorBtn addTarget:self action:@selector(toggleMirror) forControlEvents:UIControlEventTouchUpInside];
+                  [self.panel addSubview:self.mirrorBtn];
+                  
+                  [self updateUI];
               }
               return self;
           }
-          - (void)toggle {
-              BOOL isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
-              [[NSUserDefaults standardUserDefaults] setBool:!isEnabled forKey:@"VCamEnabled"];
+
+          - (void)expand { self.panel.hidden = NO; [self.player play]; }
+          - (void)minimize { self.panel.hidden = YES; [self.player pause]; }
+
+          - (void)updateUI {
+              BOOL isOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
+              [self.toggleBtn setTitle:isOn ? @"🟢 已开启" : @"🔴 未开启" forState:UIControlStateNormal];
+              [self.toggleBtn setTitleColor:isOn ? [UIColor greenColor] : [UIColor redColor] forState:UIControlStateNormal];
+              self.toggleBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1];
+          }
+
+          - (void)toggleVCam {
+              BOOL isOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
+              [[NSUserDefaults standardUserDefaults] setBool:!isOn forKey:@"VCamEnabled"];
               [[NSUserDefaults standardUserDefaults] synchronize];
+              [VCFrameEngine shared].isEnabled = !isOn;
+              [self updateUI];
+          }
+
+          - (void)toggleMirror {
+              BOOL isMirror = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"];
+              [[NSUserDefaults standardUserDefaults] setBool:!isMirror forKey:@"VCamMirror"];
+              [[NSUserDefaults standardUserDefaults] synchronize];
+          }
+
+          - (void)pickVideo {
+              PHPickerConfiguration *conf = [[PHPickerConfiguration alloc] init];
+              conf.filter = PHPickerFilter.videosFilter;
+              PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:conf];
+              picker.delegate = self;
+              [self.rootViewController presentViewController:picker animated:YES completion:nil];
+          }
+
+          - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+              [picker dismissViewControllerAnimated:YES completion:nil];
+              if (results.count == 0) return;
               
-              if (!isEnabled) {
-                  [[VCAMDataProvider shared] loadTestImage]; // 开启时，加载红色假画面
-              } else {
-                  [[VCAMDataProvider shared] updatePixelBuffer:NULL]; // 关闭时，清空假画面
+              NSItemProvider *provider = results.firstObject.itemProvider;
+              if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
+                  [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
+                      if (!url) return;
+                      // 绝对路径，所有进程可读
+                      NSString *dest = @"/tmp/vcam_video.mp4";
+                      NSURL *destURL = [NSURL fileURLWithPath:dest];
+                      [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
+                      [[NSFileManager defaultManager] copyItemAtURL:url toURL:destURL error:nil];
+                      
+                      [[NSUserDefaults standardUserDefaults] setObject:dest forKey:@"VCamVideoPath"];
+                      [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"VCamEnabled"];
+                      [[NSUserDefaults standardUserDefaults] synchronize];
+                      
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                          [[VCFrameEngine shared] loadVideoURL:destURL];
+                          [[VCFrameEngine shared] setIsEnabled:NO];
+                          
+                          self.player = [AVPlayer playerWithURL:destURL];
+                          self.playerLayer.player = self.player;
+                          [self.player play];
+                          [self updateUI];
+                      });
+                  }];
               }
           }
           @end
 
           static VCamWindow *uiWindow = nil;
 
-          // 核心 Hook：拦截代理设置
+          static NSTimeInterval lastVolUp = 0;
+          %hook SBVolumeControl
+          - (void)increaseVolume { %orig; lastVolUp = [[NSDate date] timeIntervalSince1970]; }
+          - (void)decreaseVolume {
+              %orig;
+              NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+              if (now - lastVolUp < 0.5) {
+                  dispatch_async(dispatch_get_main_queue(), ^{ if (uiWindow) uiWindow.hidden = !uiWindow.hidden; });
+                  lastVolUp = 0;
+              }
+          }
+          %end
+
           %hook AVCaptureVideoDataOutput
           - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
-              // 1. 先让系统正常绑定原代理
               %orig;
-              
               if (!delegate) return;
+              // 防止无限套娃
+              if ([delegate isKindOfClass:objc_getClass("VCAMProxy")]) return;
               
-              // 2. 把自己的“间谍”插进去
               VCAMProxy *proxy = [VCAMProxy new];
               proxy.originalDelegate = delegate;
-              
-              // 3. 强制系统把代理换成我们
               %orig(proxy, queue);
-              NSLog(@"[SuperVCam] 成功劫持相机代理！原代理: %@", delegate);
           }
           %end
 
@@ -241,6 +398,10 @@ jobs:
                       uiWindow = [[VCamWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
                       uiWindow.hidden = NO;
                   });
+              } else {
+                  NSString *path = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
+                  if (path) [[VCFrameEngine shared] loadVideoURL:[NSURL fileURLWithPath:path]];
+                  [VCFrameEngine shared].isEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamEnabled"];
               }
           }
           EOF
