@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 2.0.1
+          Version: 3.0.0
           Architecture: iphoneos-arm64
           Description: Ultimate Video Virtual Camera
           Maintainer: yourname
@@ -226,7 +226,8 @@ jobs:
           - (instancetype)initWithFrame:(CGRect)frame {
               self = [super initWithFrame:frame];
               if (self) {
-                  self.windowLevel = UIWindowLevelAlert + 2000;
+                  // 修改：仅比普通内容略高，绝不遮挡系统状态栏和其他 App 的交互
+                  self.windowLevel = UIWindowLevelNormal + 10;
                   self.backgroundColor = [UIColor clearColor];
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
@@ -362,6 +363,7 @@ jobs:
           - (void)decreaseVolume {
               %orig;
               NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+              // 组合键：0.5秒内 先按+ 再按-，触发显示/隐藏
               if (now - lastVolUp < 0.5) {
                   dispatch_async(dispatch_get_main_queue(), ^{ 
                       if (uiWindow) {
@@ -389,7 +391,7 @@ jobs:
               if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
                   dispatch_async(dispatch_get_main_queue(), ^{
                       uiWindow = [[VCamWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-                      uiWindow.hidden = NO;
+                      uiWindow.hidden = YES; // 核心：开机绝对不显示
                   });
               } else {
                   NSString *path = [[NSUserDefaults standardUserDefaults] objectForKey:@"VCamVideoPath"];
