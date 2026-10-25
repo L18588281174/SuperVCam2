@@ -29,9 +29,9 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 4.0.0
+          Version: 5.0.0
           Architecture: iphoneos-arm64
-          Description: Pro Virtual Camera (Lossless & Instant)
+          Description: Commercial Grade Virtual Camera
           Maintainer: yourname
           Author: yourname
           Section: Tweaks
@@ -49,7 +49,7 @@ jobs:
           }
           EOF
 
-          # ================= 模块 1：极致无损视频引擎 =================
+          # ================= 模块 1：视频引擎 =================
           cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -72,6 +72,7 @@ jobs:
               AVAssetReaderTrackOutput *_readerOutput;
               NSURL *_videoURL;
               CIContext *_ciContext;
+              CVPixelBufferPoolRef _pool;
           }
           @end
 
@@ -115,7 +116,6 @@ jobs:
               _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
               AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
               if (track) {
-                  // 保持最原始的 BGRA 解码，不经过任何多余的格式转换
                   _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
                       (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
                   }];
@@ -125,7 +125,6 @@ jobs:
               }
           }
 
-          // 核心：无损替换帧
           - (CMSampleBufferRef)getLosslessFrame:(CMSampleBufferRef)originalBuffer CF_RETURNS_RETAINED {
               if (!self.isEnabled || !_videoURL) return NULL;
               if (!_reader || _reader.status != AVAssetReaderStatusReading) [self rebuildReader];
@@ -140,20 +139,17 @@ jobs:
               CVImageBufferRef videoImage = CMSampleBufferGetImageBuffer(videoSb);
               if (!videoImage) { CFRelease(videoSb); return NULL; }
               
-              // 提取原相机的参数
               CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(originalBuffer);
               CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(originalBuffer);
               size_t targetW = CVPixelBufferGetWidth(originalImage);
               size_t targetH = CVPixelBufferGetHeight(originalImage);
               OSType format = CVPixelBufferGetPixelFormatType(originalImage);
 
-              // 是否开启镜像
               BOOL isMirror = [[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"];
               NSInteger angle = [[NSUserDefaults standardUserDefaults] integerForKey:@"VCamRotation"];
               
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:videoImage];
               
-              // 如果原相机和视频的比例不一致，才进行缩放，否则直接透传，画质零损失
               CGFloat scaleX = targetW / ciImage.extent.size.width;
               CGFloat scaleY = targetH / ciImage.extent.size.height;
               
@@ -186,7 +182,6 @@ jobs:
                   }
               }
 
-              // 极速封装并打入时间戳
               CMTime pts = CMSampleBufferGetPresentationTimeStamp(originalBuffer);
               CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = pts, .decodeTimeStamp = kCMTimeInvalid };
               
@@ -208,7 +203,7 @@ jobs:
           @end
           EOF
 
-          # ================= 模块 2：拦截代理 =================
+          # ================= 模块 2：代理劫持 =================
           cat > VCAMProxy.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -234,7 +229,7 @@ jobs:
           @end
           EOF
 
-          # ================= 模块 3：完美 UI 面板 =================
+          # ================= 模块 3：完美 UI (已彻底删除点击外部收起) =================
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
@@ -247,15 +242,11 @@ jobs:
           @interface VCamWindow : UIWindow <PHPickerViewControllerDelegate>
           @property (nonatomic, strong) UIView *panel;
           @property (nonatomic, strong) UIButton *ballBtn;
-          @property (nonatomic, strong) UIButton *btnLocal;
-          @property (nonatomic, strong) UIButton *btnStream;
           @property (nonatomic, strong) UIButton *btnPick;
           @property (nonatomic, strong) UIButton *btnAudio;
           @property (nonatomic, strong) UIButton *btnMic;
           @property (nonatomic, strong) UIButton *btnRotate;
           @property (nonatomic, strong) UIButton *btnFlip;
-          @property (nonatomic, strong) UIButton *btnLoop;
-          @property (nonatomic, strong) UIButton *btnFps;
           @end
 
           @implementation VCamWindow
@@ -267,10 +258,8 @@ jobs:
                   self.rootViewController = [[UIViewController alloc] init];
                   self.rootViewController.view.backgroundColor = [UIColor clearColor];
                   
-                  UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(minimize)];
-                  tap.cancelsTouchesInView = NO;
-                  [self.rootViewController.view addGestureRecognizer:tap];
-
+                  // 注意：这里去掉了 tap 手势，点击任何空白处都不会收起
+                  
                   self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
                   self.ballBtn.frame = CGRectMake(0, 0, 50, 50);
                   self.ballBtn.backgroundColor = [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:0.8];
@@ -280,8 +269,7 @@ jobs:
                   [self.ballBtn addTarget:self action:@selector(expand) forControlEvents:UIControlEventTouchUpInside];
                   [self.rootViewController.view addSubview:self.ballBtn];
                   
-                  // 完美复刻截图面板大小
-                  self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 340, 360)];
+                  self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 340, 320)];
                   self.panel.backgroundColor = [UIColor colorWithRed:30/255.0 green:30/255.0 blue:45/255.0 alpha:0.95];
                   self.panel.layer.cornerRadius = 20;
                   self.panel.clipsToBounds = YES;
@@ -289,20 +277,9 @@ jobs:
                   self.panel.center = self.rootViewController.view.center;
                   [self.rootViewController.view addSubview:self.panel];
 
-                  // 顶部标签
-                  UIView *tabView = [[UIView alloc] initWithFrame:CGRectMake(15, 15, 310, 40)];
-                  tabView.backgroundColor = [UIColor colorWithRed:45/255.0 green:45/255.0 blue:65/255.0 alpha:1];
-                  tabView.layer.cornerRadius = 10;
-                  [self.panel addSubview:tabView];
-                  
-                  self.btnLocal = [self createTabBtn:CGRectMake(0, 0, 155, 40) title:@"📺 本地视频" tag:0];
-                  self.btnStream = [self createTabBtn:CGRectMake(155, 0, 155, 40) title:@"📡 推流接管" tag:1];
-                  [tabView addSubview:self.btnLocal];
-                  [tabView addSubview:self.btnStream];
-
-                  // 选视频大按钮
+                  // 选视频按钮
                   self.btnPick = [UIButton buttonWithType:UIButtonTypeSystem];
-                  self.btnPick.frame = CGRectMake(15, 65, 310, 45);
+                  self.btnPick.frame = CGRectMake(15, 15, 310, 45);
                   self.btnPick.backgroundColor = [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:1];
                   self.btnPick.layer.cornerRadius = 10;
                   [self.btnPick setTitle:@"🎬 从相册选择视频" forState:UIControlStateNormal];
@@ -311,56 +288,30 @@ jobs:
                   [self.panel addSubview:self.btnPick];
 
                   // 音频与麦克风
-                  self.btnAudio = [self createGridBtn:CGRectMake(15, 120, 150, 35) title:@"🔇 画面原声: 关"];
-                  self.btnAudio.tag = 10;
-                  self.btnMic = [self createGridBtn:CGRectMake(175, 120, 150, 35) title:@"🎤 麦克风: 开"];
-                  self.btnMic.tag = 11;
+                  self.btnAudio = [self createGridBtn:CGRectMake(15, 70, 150, 40) title:@"🔇 画面原声: 关"]; self.btnAudio.tag = 10;
+                  self.btnMic = [self createGridBtn:CGRectMake(175, 70, 150, 40) title:@"🎤 麦克风: 开"]; self.btnMic.tag = 11;
                   [self.panel addSubview:self.btnAudio];
                   [self.panel addSubview:self.btnMic];
 
-                  // 控制面板（旋转、翻转等）
-                  self.btnRotate = [self createGridBtn:CGRectMake(15, 165, 70, 50) title:@"🔄 旋转\n0°"];
-                  self.btnRotate.tag = 12;
-                  self.btnFlip = [self createGridBtn:CGRectMake(95, 165, 70, 50) title:@"↔️ 镜像\n关"];
-                  self.btnFlip.tag = 13;
-                  self.btnLoop = [self createGridBtn:CGRectMake(175, 165, 70, 50) title:@"🔁 循环\n开"];
-                  self.btnLoop.tag = 14;
-                  self.btnFps = [self createGridBtn:CGRectMake(255, 165, 70, 50) title:@"⏱ 帧率\n30"];
-                  self.btnFps.tag = 15;
+                  // 控制面板
+                  self.btnRotate = [self createGridBtn:CGRectMake(15, 125, 95, 50) title:@"🔄 旋转\n0°"]; self.btnRotate.tag = 12;
+                  self.btnFlip = [self createGridBtn:CGRectMake(120, 125, 95, 50) title:@"↔️ 镜像\n关"]; self.btnFlip.tag = 13;
                   [self.panel addSubview:self.btnRotate];
                   [self.panel addSubview:self.btnFlip];
-                  [self.panel addSubview:self.btnLoop];
-                  [self.panel addSubview:self.btnFps];
-
-                  // 底部功能
-                  UIButton *btnLive = [self createGridBtn:CGRectMake(15, 225, 95, 40) title:@"🎯 活体检测"]; btnLive.tag = 16;
-                  UIButton *btnAct = [self createGridBtn:CGRectMake(120, 225, 95, 40) title:@"🔑 激活"]; btnAct.tag = 17;
-                  UIButton *btnHelp = [self createGridBtn:CGRectMake(225, 225, 100, 40) title:@"❓ 说明"]; btnHelp.tag = 18;
-                  [self.panel addSubview:btnLive];
-                  [self.panel addSubview:btnAct];
-                  [self.panel addSubview:btnHelp];
 
                   // 收起按钮
                   UIButton *btnClose = [UIButton buttonWithType:UIButtonTypeSystem];
-                  btnClose.frame = CGRectMake(120, 280, 100, 30);
-                  [btnClose setTitle:@"收起" forState:UIControlStateNormal];
-                  [btnClose setTitleColor:[UIColor lightGrayColor] forState:UIControlStateNormal];
+                  btnClose.frame = CGRectMake(120, 190, 100, 40);
+                  btnClose.backgroundColor = [UIColor colorWithRed:100/255.0 green:100/255.0 blue:100/255.0 alpha:0.5];
+                  btnClose.layer.cornerRadius = 10;
+                  [btnClose setTitle:@"收起面板" forState:UIControlStateNormal];
+                  [btnClose setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
                   [btnClose addTarget:self action:@selector(minimize) forControlEvents:UIControlEventTouchUpInside];
                   [self.panel addSubview:btnClose];
                   
                   [self refreshUI];
               }
               return self;
-          }
-
-          - (UIButton *)createTabBtn:(CGRect)frame title:(NSString *)title tag:(NSInteger)tag {
-              UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-              btn.frame = frame;
-              [btn setTitle:title forState:UIControlStateNormal];
-              [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-              btn.layer.cornerRadius = 10;
-              btn.backgroundColor = (tag == 0) ? [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:1] : [UIColor clearColor];
-              return btn;
           }
 
           - (UIButton *)createGridBtn:(CGRect)frame title:(NSString *)title {
@@ -434,8 +385,8 @@ jobs:
                       
                       NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
                       [def setObject:dest forKey:@"VCamVideoPath"];
-                      [def setBool:YES forKey:@"VCamEnabled"]; // 选完直接开启
-                      [def setBool:YES forKey:@"VCamAudio"]; // 默认开原声
+                      [def setBool:YES forKey:@"VCamEnabled"];
+                      [def setBool:YES forKey:@"VCamAudio"];
                       [def synchronize];
                       
                       dispatch_async(dispatch_get_main_queue(), ^{
