@@ -29,7 +29,7 @@ jobs:
           cat > control << 'EOF'
           Package: com.yourname.supervcam
           Name: SuperVCam
-          Version: 2.0.0
+          Version: 2.0.1
           Architecture: iphoneos-arm64
           Description: Ultimate Video Virtual Camera
           Maintainer: yourname
@@ -49,7 +49,6 @@ jobs:
           }
           EOF
 
-          # ================= 模块 1：视频引擎 (负责解码和防卡死) =================
           cat > VCFrameEngine.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -90,7 +89,6 @@ jobs:
               _reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
               AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
               if (track) {
-                  // 解码出 BGRA 格式以便于处理
                   _readerOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:@{
                       (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
                   }];
@@ -114,7 +112,6 @@ jobs:
           @end
           EOF
 
-          # ================= 模块 2：双面间谍 Proxy (核心替换) =================
           cat > VCAMProxy.h << 'EOF'
           #import <Foundation/Foundation.h>
           #import <AVFoundation/AVFoundation.h>
@@ -143,7 +140,6 @@ jobs:
                   return;
               }
 
-              // === 核心：偷天换日 ===
               CVImageBufferRef originalImage = CMSampleBufferGetImageBuffer(sampleBuffer);
               CVImageBufferRef videoImage = CMSampleBufferGetImageBuffer(videoSb);
               
@@ -158,20 +154,17 @@ jobs:
               OSType format = CVPixelBufferGetPixelFormatType(originalImage);
               CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
 
-              // 将视频帧缩放并对齐到目标相机的尺寸
               CIImage *ciImage = [CIImage imageWithCVPixelBuffer:videoImage];
               CGFloat scaleX = targetW / ciImage.extent.size.width;
               CGFloat scaleY = targetH / ciImage.extent.size.height;
               ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
               ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, targetW, targetH)];
 
-              // 开启镜像（若设置）
               if ([[NSUserDefaults standardUserDefaults] boolForKey:@"VCamMirror"]) {
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
                   ciImage = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(targetW, 0)];
               }
 
-              // 渲染到新 Buffer 中，格式强行对齐原相机
               NSDictionary *attrs = @{
                   (id)kCVPixelBufferPixelFormatTypeKey: @(format),
                   (id)kCVPixelBufferWidthKey: @(targetW),
@@ -187,13 +180,11 @@ jobs:
                   [ctx render:ciImage toCVPixelBuffer:newBuf];
               }
 
-              // 重写时间戳并封装
               CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
               CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = pts, .decodeTimeStamp = kCMTimeInvalid };
               CMSampleBufferRef finalSb = NULL;
               CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, newBuf, fmtDesc, &timing, &finalSb);
 
-              // 继承原相机的附件（防止平台检测）
               if (finalSb) {
                   CFArrayRef attArr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
                   if (attArr && CFArrayGetCount(attArr) > 0) {
@@ -206,14 +197,12 @@ jobs:
                   [self.originalDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
               }
 
-              // 内存清理，防止 OOM
               if (newBuf) CVPixelBufferRelease(newBuf);
               CFRelease(videoSb);
           }
           @end
           EOF
 
-          # ================= 模块 3：UI 与 音量键 Hook =================
           cat > Tweak.x << 'EOF'
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
@@ -246,7 +235,6 @@ jobs:
                   tap.cancelsTouchesInView = NO;
                   [self.rootViewController.view addGestureRecognizer:tap];
 
-                  // 悬浮球
                   self.ballBtn = [UIButton buttonWithType:UIButtonTypeCustom];
                   self.ballBtn.frame = CGRectMake(0, 0, 50, 50);
                   self.ballBtn.backgroundColor = [UIColor colorWithRed:0 green:122/255.0 blue:1 alpha:0.8];
@@ -256,7 +244,6 @@ jobs:
                   [self.ballBtn addTarget:self action:@selector(expand) forControlEvents:UIControlEventTouchUpInside];
                   [self.rootViewController.view addSubview:self.ballBtn];
                   
-                  // 主面板
                   self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 260, 300)];
                   self.panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.9];
                   self.panel.layer.cornerRadius = 15;
@@ -340,7 +327,6 @@ jobs:
               if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
                   [provider loadFileRepresentationForTypeIdentifier:@"public.movie" completionHandler:^(NSURL *url, NSError *error) {
                       if (!url) return;
-                      // 绝对路径，所有进程可读
                       NSString *dest = @"/tmp/vcam_video.mp4";
                       NSURL *destURL = [NSURL fileURLWithPath:dest];
                       [[NSFileManager defaultManager] removeItemAtURL:destURL error:nil];
@@ -367,13 +353,21 @@ jobs:
           static VCamWindow *uiWindow = nil;
 
           static NSTimeInterval lastVolUp = 0;
+
           %hook SBVolumeControl
-          - (void)increaseVolume { %orig; lastVolUp = [[NSDate date] timeIntervalSince1970]; }
+          - (void)increaseVolume {
+              %orig;
+              lastVolUp = [[NSDate date] timeIntervalSince1970];
+          }
           - (void)decreaseVolume {
               %orig;
               NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
               if (now - lastVolUp < 0.5) {
-                  dispatch_async(dispatch_get_main_queue(), ^{ if (uiWindow) uiWindow.hidden = !uiWindow.hidden; });
+                  dispatch_async(dispatch_get_main_queue(), ^{ 
+                      if (uiWindow) {
+                          uiWindow.hidden = !uiWindow.hidden; 
+                      }
+                  });
                   lastVolUp = 0;
               }
           }
@@ -383,7 +377,6 @@ jobs:
           - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate queue:(dispatch_queue_t)queue {
               %orig;
               if (!delegate) return;
-              // 防止无限套娃
               if ([delegate isKindOfClass:objc_getClass("VCAMProxy")]) return;
               
               VCAMProxy *proxy = [VCAMProxy new];
